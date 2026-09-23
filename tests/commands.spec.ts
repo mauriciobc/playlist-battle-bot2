@@ -11,6 +11,34 @@ describe("htmlToText entity decoding", () => {
     expect(htmlToText("<p>&lt;b&gt; &amp; bold &quot;quoted&quot;&#39;</p>")).toBe("<b> & bold \"quoted\"'");
   });
 
+  it("preserves Mastodon mention @ prefixes (same instance)", () => {
+    const html = '<p><span class="h-card" translate="no"><a href="https://mastodon.social/@alice" class="u-url mention">@<span>alice</span></a></span> hello</p>';
+    expect(htmlToText(html)).toBe("@alice hello");
+  });
+
+  it("preserves Mastodon mention @ prefixes (cross-instance)", () => {
+    const html = '<p><span class="h-card" translate="no"><a href="https://ursal.zone/@alice" class="u-url mention">@<span>alice@ursal.zone</span></a></span> hello</p>';
+    expect(htmlToText(html)).toBe("@alice@ursal.zone hello");
+  });
+
+  it("handles Mastodon mention HTML with invisible prefix spans", () => {
+    const html = '<p><a href="https://ursal.zone/@alice" class="u-url mention"><span class="invisible">https://ursal.zone/</span><span>@alice@ursal.zone</span></a> hello</p>';
+    const result = htmlToText(html);
+    expect(result).toContain("@alice@ursal.zone");
+  });
+
+  it("preserves multiple mentions (same + cross-instance) in one status", () => {
+    const html = '<p><a href="https://mastodon.social/@bot" class="u-url mention">@<span>bot</span></a> newgame "X" 8 <a href="https://ursal.zone/@alice" class="u-url mention">@<span>alice@ursal.zone</span></a></p>';
+    const result = htmlToText(html);
+    expect(result).toBe('@bot newgame "X" 8 @alice@ursal.zone');
+  });
+
+  it("preserves @ in mention even when preceded by other text", () => {
+    const html = '<p>hey <a href="https://ursal.zone/@bob" class="u-url mention">@<span>bob@ursal.zone</span></a> check this out</p>';
+    const result = htmlToText(html);
+    expect(result).toBe("hey @bob@ursal.zone check this out");
+  });
+
   it("does not double-decode (htmlToText('&amp;lt;') is the literal '&lt;')", () => {
     expect(htmlToText("&amp;lt;")).toBe("&lt;");
     expect(htmlToText("a &amp;amp; b")).toBe("a &amp; b");
@@ -70,6 +98,84 @@ describe("parseCreateCommand", () => {
       BOT,
     );
     expect(r).toMatchObject({ theme: "X", challengers: [`${BOT}@other.instance`] });
+  });
+
+  it("allows cross-instance same-handle with instanceDomain param", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @${BOT}@other.instance`,
+      BOT,
+      "mastodon.social",
+    );
+    expect(r).toMatchObject({ theme: "X", challengers: [`${BOT}@other.instance`] });
+  });
+
+  it("still filters bot's own bare mention as challenger", () => {
+    const r = parseCreateCommand(`@${BOT} newgame "X" 8 @${BOT}`, BOT);
+    expect(r).toMatchObject({ error: expect.stringMatching(/challenger/i) });
+  });
+
+  it("still filters bot's fully-qualified same-instance mention", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @${BOT}@mastodon.social`,
+      BOT,
+      "mastodon.social",
+    );
+    expect(r).toMatchObject({ error: expect.stringMatching(/challenger/i) });
+  });
+
+  it("allows cross-instance different-handle as challenger", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @alice@other.social`,
+      BOT,
+    );
+    expect(r).toMatchObject({ theme: "X", challengers: ["alice@other.social"] });
+  });
+
+  it("allows mixed same-instance and cross-instance challengers", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @alice @bob@other.social`,
+      BOT,
+    );
+    expect(r).toMatchObject({ theme: "X", challengers: ["alice", "bob@other.social"] });
+  });
+
+  it("allows multiple cross-instance challengers", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @alice@instance1.social @bob@instance2.social`,
+      BOT,
+    );
+    expect(r).toMatchObject({
+      theme: "X",
+      challengers: ["alice@instance1.social", "bob@instance2.social"],
+    });
+  });
+
+  it("detects bot via @bot@domain mention (remote instance)", () => {
+    const r = parseCreateCommand(
+      `@${BOT}@remote.social newgame "X" 8 @alice`,
+      BOT,
+    );
+    expect(r).toMatchObject({ theme: "X", challengers: ["alice"] });
+  });
+
+  it("filters bot's cross-instance mention when it matches bot's full handle", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @${BOT}@other.social`,
+      BOT,
+      "other.social",
+    );
+    expect(r).toMatchObject({ error: expect.stringMatching(/challenger/i) });
+  });
+
+  it("handles three cross-instance challengers", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @a@mastodon.social @b@bsky.social @c@ursal.zone`,
+      BOT,
+    );
+    expect(r).toMatchObject({
+      theme: "X",
+      challengers: ["a@mastodon.social", "b@bsky.social", "c@ursal.zone"],
+    });
   });
 
   it("returns error result when no challengers", () => {
