@@ -22,7 +22,7 @@ Rules are implemented as a pure domain layer — no I/O, no Mastodon, no DB:
 | --- | --- |
 | Players | 2–4 total (host + 1–3 challengers). The cap is Mastodon's 4 poll options |
 | Playlist length N | 8–12 tunes, fixed at creation |
-| Instance | Same-instance only — every player must be local, since polls do not count remote votes |
+| Instance | Same-instance or federated — any account may host, play, or vote (Mastodon counts remote poll votes) |
 | Duplicates | The same account twice (or a challenger equal to the host) is rejected; the same video twice inside your own playlist is rejected |
 | Entry | `@bot newgame "<theme>" 8–12 @challenger…` as a public mention. The host is auto-accepted. Themes are limited to 120 characters. |
 | Challenger reply | DM `accept` or `decline` |
@@ -41,7 +41,7 @@ Worst-case game length is `acceptance + submission + (N × (poll + replacement))
 
 ## 3. Duel mechanics
 
-- **Rounds = N.** Round $k$ plays each eligible player's tune #$k$. Each round is a public, single-choice poll posted down a thread: round announce → one tune post per player → the poll. Anyone on the instance may vote, including players for their own tunes. The round announce asks voters to pick the song that best fits the theme. Poll option order is shuffled per round (deterministic seed = hash(gameId + round)); announce and tune posts keep player-labeled attribution.
+- **Rounds = N.** Round $k$ plays each eligible player's tune #$k$. Each round is a public, single-choice poll posted down a thread: round announce → one tune post per player → the poll. Anyone may vote, including remote accounts and players for their own tunes. The round announce asks voters to pick the song that best fits the theme. Poll option order is shuffled per round (deterministic seed = hash(gameId + round)); announce and tune posts keep player-labeled attribution.
 - **Scoring.** Every vote is one permanent point for that tune's player. A strict winner of the round also takes the **pot** as a bonus, and the pot resets to 0.
 - **Tie.** Two or more players sharing the top vote count — or everyone at zero — is a tie: no winner, **pot +1**, carried into the next round.
 - **Quorum.** A poll with fewer than 3 total votes is scored as a tie (pot +1), even if one option leads 1–0 or 2–0.

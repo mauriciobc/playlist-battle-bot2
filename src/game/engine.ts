@@ -19,7 +19,6 @@ import { m, type Messages } from "../i18n/index.js";
 export type Participant = {
   accountId: string;
   acct: string;
-  isLocal: boolean;
 };
 
 export type CreateGameInput = {
@@ -44,9 +43,6 @@ export class ValidationError extends Error {
 
 export function validateCreate(input: CreateGameInput, msg: Messages = m()): void {
   const { host, theme, playlistLength, challengers } = input;
-  if (!host.isLocal) {
-    throw new ValidationError(msg.errHostRemote(host.acct));
-  }
   if (!theme.trim()) throw new ValidationError(msg.errThemeEmpty());
   if (theme.trim().length > MAX_THEME_LENGTH) {
     throw new ValidationError(msg.errThemeTooLong(MAX_THEME_LENGTH));
@@ -60,12 +56,6 @@ export function validateCreate(input: CreateGameInput, msg: Messages = m()): voi
   const total = 1 + challengers.length;
   if (total > 4) {
     throw new ValidationError(msg.errMaxPlayers());
-  }
-  const remote = challengers.filter((c) => !c.isLocal);
-  if (remote.length > 0) {
-    throw new ValidationError(
-      msg.errRemotePlayers(remote.map((c) => c.acct).join(", ")),
-    );
   }
   const ids = [host.accountId, ...challengers.map((c) => c.accountId)];
   if (new Set(ids).size !== ids.length) {

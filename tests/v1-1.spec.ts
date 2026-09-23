@@ -149,7 +149,6 @@ function setupHandlerHarness(opts: HarnessOpts = {}) {
       id: `id-${acct}`,
       acct: acct.includes("@") ? acct : `${acct}@mastodon.example`,
       username: acct.split("@")[0]!,
-      local: true,
     })),
     resolveTitle: vi.fn(
       opts.resolveTitle ??

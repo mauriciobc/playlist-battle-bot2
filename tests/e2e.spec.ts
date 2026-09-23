@@ -128,7 +128,6 @@ describe("Phase 8 — simulated full-game E2E", () => {
           id: `id-${username}`,
           acct: username,
           username,
-          local: true,
         };
       }),
       resolveTitle: vi.fn(async (videoId: string) => ({

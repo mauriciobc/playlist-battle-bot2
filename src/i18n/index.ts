@@ -21,8 +21,6 @@ export type Messages = {
   errLengthRange: () => string;
   errMinChallenger: () => string;
   errMaxPlayers: () => string;
-  errRemotePlayers: (list: string) => string;
-  errHostRemote: (acct: string) => string;
   errDuplicatePlayer: () => string;
   errNotInvited: () => string;
   errAlreadyDeclined: () => string;
@@ -41,7 +39,6 @@ export type Messages = {
   errCooldown: (retryAt: string) => string;
 
   // mention.ts
-  remoteNotLocal: (acct: string) => string;
   errPrivateCreate: () => string;
   gameCreated: (
     theme: string,
@@ -131,10 +128,6 @@ const en: Messages = {
   errLengthRange: () => "Playlist length must be between 8 and 12.",
   errMinChallenger: () => "Need at least 1 challenger (2 players minimum).",
   errMaxPlayers: () => "Maximum 4 players (host + 3 challengers).",
-  errRemotePlayers: (list) =>
-    `All players must be local to this instance (same-instance only); remote: ${list}`,
-  errHostRemote: (acct) =>
-    `The host account must be local to this instance (same-instance only); remote: ${acct}`,
   errDuplicatePlayer: () => "Duplicate player (or challenger equals host).",
   errNotInvited: () => "You are not an invited challenger for this game.",
   errAlreadyDeclined: () => "You already declined this invitation.",
@@ -153,8 +146,6 @@ const en: Messages = {
   errConcurrentGames: (n, max) => `You already have ${n} active games (max ${max}).`,
   errCooldown: (retryAt) => `Game creation cooldown: try again after ${retryAt}.`,
 
-  remoteNotLocal: (acct) =>
-    `@${acct} is not on this instance — games are same-instance only (polls don't count remote votes).`,
   errPrivateCreate: () =>
     "Create duels with a public or unlisted mention; private posts cannot host the public round thread.",
   gameCreated: (theme, length, players, deadline, gameId) =>
@@ -244,7 +235,7 @@ const en: Messages = {
     `Pot: ${pot} · Players this round: ${playing}`,
   tuneLine: (acct, title, url) => `🎵 @${acct} — ${title}\n${url}`,
   pollPrompt: (round) =>
-    `🗳️ Vote for the best tune in Round ${round}! Anyone on the instance can vote.`,
+    `🗳️ Vote for the best tune in Round ${round}! Anyone can vote.`,
   resolutionWalkover: (round, acct, pot) =>
     `🚶 Round ${round}: walkover — @${acct} wins unopposed and takes the pot (+${pot}).`,
   resolutionTie: (round, newPot) =>
@@ -295,10 +286,6 @@ const ptBR: Messages = {
   errLengthRange: () => "O tamanho da playlist deve ser entre 8 e 12.",
   errMinChallenger: () => "É preciso pelo menos 1 desafiante (mínimo de 2 jogadores).",
   errMaxPlayers: () => "Máximo de 4 jogadores (anfitrião + 3 desafiadores).",
-  errRemotePlayers: (list) =>
-    `Todos os jogadores precisam ser desta instância (somente mesma instância); remotos: ${list}`,
-  errHostRemote: (acct) =>
-    `A conta do anfitrião precisa ser desta instância (somente mesma instância); remota: ${acct}`,
   errDuplicatePlayer: () => "Jogador duplicado (ou o desafiante é o anfitrião).",
   errNotInvited: () => "Você não é um desafiante convidado neste duelo.",
   errAlreadyDeclined: () => "Você já recusou este convite.",
@@ -317,8 +304,6 @@ const ptBR: Messages = {
   errConcurrentGames: (n, max) => `Você já tem ${n} jogos ativos (máx ${max}).`,
   errCooldown: (retryAt) => `Cooldown de criação de jogo: tente novamente após ${retryAt}.`,
 
-  remoteNotLocal: (acct) =>
-    `@${acct} não está nesta instância — jogos são apenas na mesma instância (enquetes não contam votos remotos).`,
   errPrivateCreate: () =>
     "Crie duelos com uma menção pública ou não listada; posts privados não podem hospedar a thread pública das rodadas.",
   gameCreated: (theme, length, players, deadline, gameId) =>
@@ -408,7 +393,7 @@ const ptBR: Messages = {
     `Pote: ${pot} · Jogadores nesta rodada: ${playing}`,
   tuneLine: (acct, title, url) => `🎵 @${acct} — ${title}\n${url}`,
   pollPrompt: (round) =>
-    `🗳️ Vote na melhor faixa da Rodada ${round}! Qualquer pessoa da instância pode votar.`,
+    `🗳️ Vote na melhor faixa da Rodada ${round}! Qualquer pessoa pode votar.`,
   resolutionWalkover: (round, acct, pot) =>
     `🚶 Rodada ${round}: W.O. — @${acct} vence sem oposição e leva o pote (+${pot}).`,
   resolutionTie: (round, newPot) =>

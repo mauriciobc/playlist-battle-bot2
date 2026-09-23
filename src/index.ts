@@ -78,8 +78,7 @@ async function main(): Promise<void> {
       const r = await client.get<{ id: string; acct: string; username: string }>(
         `/api/v1/accounts/lookup?acct=${encodeURIComponent(acct)}`,
       );
-      const local = !r.acct.includes("@") || r.acct.endsWith(`@${instanceDomain}`);
-      return { id: r.id, acct: r.acct, username: r.username, local };
+      return { id: r.id, acct: r.acct, username: r.username };
     },
     resolveTitle: (videoId: string) => resolveTitle(videoId, { db }),
     checkAvailable: (videoId: string) => checkAvailable(videoId),

@@ -14,7 +14,7 @@ export type CreateCommand =
     }
   | { error: string };
 
-const MENTION_RE = /@([A-Za-z0-9_]+)(?:@[A-Za-z0-9.-]+)?/g;
+const MENTION_RE = /@([A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?)/g;
 
 function stripLeadingMentions(text: string): string {
   return text.replace(/^\s*(@[A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?\s*)+/, "");
@@ -28,6 +28,11 @@ function extractMentions(text: string): string[] {
   return out;
 }
 
+/** Local part of a handle (`alice` for `alice@other.social`). */
+function localPart(handle: string): string {
+  return handle.split("@")[0]!;
+}
+
 /**
  * Parse: `@bot newgame "<theme>" <8-12> @ch1 [@ch2] [@ch3]`
  * Returns CreateCommand (ok or {error}) when the bot is mentioned with newgame,
@@ -35,7 +40,7 @@ function extractMentions(text: string): string[] {
  */
 export function parseCreateCommand(text: string, botAcct: string): CreateCommand | null {
   const mentions = extractMentions(text);
-  if (!mentions.some((m) => m.toLowerCase() === botAcct.toLowerCase())) return null;
+  if (!mentions.some((m) => localPart(m).toLowerCase() === botAcct.toLowerCase())) return null;
 
   const withoutMentions = stripLeadingMentions(text);
   // Also drop mid-text bot mentions
@@ -83,7 +88,7 @@ export function parseCreateCommand(text: string, botAcct: string): CreateCommand
   }
 
   const challengers = extractMentions(afterLen).filter(
-    (c) => c.toLowerCase() !== botAcct.toLowerCase(),
+    (c) => localPart(c).toLowerCase() !== botAcct.toLowerCase(),
   );
 
   if (challengers.length === 0) {
@@ -102,7 +107,7 @@ export function parseCreateCommand(text: string, botAcct: string): CreateCommand
 
 export function parseStatusCommand(text: string, botAcct: string): boolean {
   const mentions = extractMentions(text);
-  if (!mentions.some((m) => m.toLowerCase() === botAcct.toLowerCase())) return false;
+  if (!mentions.some((m) => localPart(m).toLowerCase() === botAcct.toLowerCase())) return false;
   const rest = stripLeadingMentions(text).trim();
   return /^(status|help)\b/i.test(rest);
 }

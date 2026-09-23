@@ -54,10 +54,9 @@ describe("handlers integration", () => {
       creationCooldownSec: 600,
       maxGamesPerPlayer: 3,
       lookup: vi.fn(async (acct: string) => ({
-        id: `id-${acct}`,
-        acct: acct.includes("@") ? acct : `${acct}@mastodon.example`,
+        id: `id-${acct.split("@")[0]!}`,
+        acct,
         username: acct.split("@")[0]!,
-        local: !acct.includes("@") || acct.endsWith("@mastodon.example"),
       })),
       resolveTitle: vi.fn(async (videoId: string) => ({
         videoId,
@@ -183,7 +182,7 @@ describe("handlers integration", () => {
     expect(posts).toHaveLength(1);
   });
 
-  it("rejects a remote host mention (same-instance only)", async () => {
+  it("accepts a remote host mention (federated host)", async () => {
     const result = await handlePublicCommand(
       {
         accountId: "id-remotehost",
@@ -192,12 +191,14 @@ describe("handlers integration", () => {
         content: `<p>@playlistbattle newgame "X" 8 @alice</p>`,
         inReplyToId: null,
       },
-      { ...deps, lookup: async () => ({ id: "id-alice", acct: "alice", username: "alice", local: true }) },
+      { ...deps, lookup: async () => ({ id: "id-alice", acct: "alice", username: "alice" }) },
     );
-    expect(result).toMatchObject({ handled: true, kind: "error" });
-    expect(db.prepare("SELECT COUNT(*) AS c FROM games").get()).toEqual({ c: 0 });
-    const body = posts[0]!.body as { status: string };
-    expect(body.status).toMatch(/local/i);
+    expect(result).toMatchObject({ handled: true, kind: "game_created" });
+    expect(db.prepare("SELECT COUNT(*) AS c FROM games").get()).toEqual({ c: 1 });
+    const host = db
+      .prepare(`SELECT acct FROM players WHERE role = 'host'`)
+      .get() as { acct: string };
+    expect(host.acct).toBe("remotehost@faraway.social");
   });
 
   it("accepts a pending challenger within the window", async () => {
@@ -239,16 +240,22 @@ describe("handlers integration", () => {
     expect(g.status).toBe("INVITED");
   });
 
-  it("rejects remote challenger via lookup", async () => {
+  it("accepts remote challengers via lookup (federated players)", async () => {
     deps.lookup = vi.fn(async (acct: string) => ({
       id: `id-${acct}`,
       acct: `${acct}@remote.social`,
       username: acct,
-      local: false,
     }));
     const result = await createViaMention();
-    expect(result).toMatchObject({ kind: "error" });
-    expect(db.prepare("SELECT COUNT(*) AS c FROM games").get()).toEqual({ c: 0 });
+    expect(result).toMatchObject({ kind: "game_created" });
+    expect(db.prepare("SELECT COUNT(*) AS c FROM games").get()).toEqual({ c: 1 });
+    const challengers = db
+      .prepare(`SELECT acct FROM players WHERE role = 'challenger'`)
+      .all() as { acct: string }[];
+    expect(challengers.map((c) => c.acct).sort()).toEqual([
+      "alice@remote.social",
+      "bob@remote.social",
+    ]);
   });
 
   it("challenger DM accept → COLLECTING, bot DMs submission prompt", async () => {

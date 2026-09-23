@@ -69,7 +69,7 @@
 - [x] DONE `handlers/commands.ts` — parse `newgame`/`status`/`help`, validation replies
 - [x] DONE `handlers/mention.ts` — public command routing + full create/accept/submit flow
 - [x] DONE `handlers/mention.ts` DM path — accept/decline, link collection (1-per-line fast path)
-- [x] DONE Local-account check via accounts lookup (reject remote accts)
+- [x] DONE Local-account check via accounts lookup (reject remote accts) — later dropped: federated players/votes allowed
 - [x] DONE Integration tests with mocked notifications (happy path + validation failures)
 - **Done when:** create → accept → submit driven end-to-end in tests ✅ (167 tests green)
 

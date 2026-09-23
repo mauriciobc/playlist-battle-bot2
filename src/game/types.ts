@@ -31,7 +31,7 @@ export type InviteStatus = "pending" | "accepted" | "declined" | "expired";
 
 export type Player = {
   accountId: string;
-  acct: string; // local handle for mentions
+  acct: string; // account handle for mentions (user@domain when remote)
   displayName: string | null;
   role: PlayerRole;
   inviteStatus: InviteStatus;

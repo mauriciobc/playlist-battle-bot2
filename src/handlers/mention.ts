@@ -55,7 +55,7 @@ export type HandlerDeps = {
   submissionWindowSec: number;
   creationCooldownSec: number;
   maxGamesPerPlayer: number;
-  lookup: (acct: string) => Promise<{ id: string; acct: string; username: string; local: boolean }>;
+  lookup: (acct: string) => Promise<{ id: string; acct: string; username: string }>;
   resolveTitle: (videoId: string) => Promise<{ videoId: string; title: string; author: string | null; canonicalUrl: string }>;
   /** Live availability check for a video (never reads the title cache). */
   checkAvailable: (videoId: string) => Promise<boolean>;
@@ -239,22 +239,17 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
       openGamesForAccount(deps.db, input.accountId),
     );
 
-    // Resolve challenger accounts (same-instance only)
+    // Resolve challenger accounts (same or remote instance — federated polls count)
     const challengers = [];
     for (const acct of cmd.challengers) {
       const info = await deps.lookup(acct);
-      if (!info.local) {
-        throw new ValidationError(m().remoteNotLocal(acct));
-      }
-      challengers.push({ accountId: info.id, acct: info.username, isLocal: true });
+      challengers.push({ accountId: info.id, acct: info.acct });
     }
 
     const host = {
       accountId: input.accountId,
-      acct: input.accountAcct.split("@")[0]!,
-      // Mastodon mentions from a local account are a bare username; federated
-      // ones carry "user@domain". A remote host fails validateCreate.
-      isLocal: !input.accountAcct.includes("@"),
+      // Local accounts report a bare username; remote ones carry "user@domain".
+      acct: input.accountAcct,
     };
 
     const { game, players } = createGameInput(

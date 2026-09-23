@@ -17,12 +17,12 @@ const NOW = new Date("2026-09-21T12:00:00Z");
 
 function validCreate(overrides: Partial<CreateGameInput> = {}): CreateGameInput {
   return {
-    host: { accountId: "host1", acct: "host", isLocal: true },
+    host: { accountId: "host1", acct: "host" },
     theme: "80s Synth",
     playlistLength: 8,
     challengers: [
-      { accountId: "c1", acct: "chall1", isLocal: true },
-      { accountId: "c2", acct: "chall2", isLocal: true },
+      { accountId: "c1", acct: "chall1" },
+      { accountId: "c2", acct: "chall2" },
     ],
     now: NOW,
     ...overrides,
@@ -42,7 +42,7 @@ describe("validateCreate (PRD §5.1)", () => {
     expect(() =>
       validateCreate(
         validCreate({
-          challengers: [1, 2, 3, 4].map((i) => ({ accountId: `c${i}`, acct: `c${i}`, isLocal: true })),
+          challengers: [1, 2, 3, 4].map((i) => ({ accountId: `c${i}`, acct: `c${i}` })),
         }),
       ),
     ).toThrow(/4 players/);
@@ -55,24 +55,24 @@ describe("validateCreate (PRD §5.1)", () => {
     expect(() => validateCreate(validCreate({ playlistLength: 12 }))).not.toThrow();
   });
 
-  it("rejects remote challengers (same-instance only, PRD §2.1)", () => {
+  it("accepts remote challengers (federated players)", () => {
     expect(() =>
       validateCreate(
         validCreate({
-          challengers: [{ accountId: "remote", acct: "x@other.social", isLocal: false }],
+          challengers: [{ accountId: "remote", acct: "x@other.social" }],
         }),
       ),
-    ).toThrow(/local/i);
+    ).not.toThrow();
   });
 
-  it("rejects a remote host (same-instance only)", () => {
+  it("accepts a remote host (federated host)", () => {
     expect(() =>
       validateCreate(
         validCreate({
-          host: { accountId: "remote-host", acct: "y@other.social", isLocal: false },
+          host: { accountId: "remote-host", acct: "y@other.social" },
         }),
       ),
-    ).toThrow(/local|remote/i);
+    ).not.toThrow();
   });
 
   it("rejects duplicate challengers / challenger == host", () => {
@@ -80,8 +80,8 @@ describe("validateCreate (PRD §5.1)", () => {
       validateCreate(
         validCreate({
           challengers: [
-            { accountId: "c1", acct: "chall1", isLocal: true },
-            { accountId: "c1", acct: "chall1", isLocal: true },
+            { accountId: "c1", acct: "chall1" },
+            { accountId: "c1", acct: "chall1" },
           ],
         }),
       ),
@@ -89,7 +89,7 @@ describe("validateCreate (PRD §5.1)", () => {
     expect(() =>
       validateCreate(
         validCreate({
-          challengers: [{ accountId: "host1", acct: "host", isLocal: true }],
+          challengers: [{ accountId: "host1", acct: "host" }],
         }),
       ),
     ).toThrow(/duplicate|host/i);
@@ -280,7 +280,7 @@ describe("finalizeCollection (PRD §5.4, §7)", () => {
     const input = validCreate(
       playersCount === 3
         ? {}
-        : { challengers: [{ accountId: "c1", acct: "chall1", isLocal: true }] },
+        : { challengers: [{ accountId: "c1", acct: "chall1" }] },
     );
     const { game, players } = createGameInput(input, {
       pollDurationSec: 86400,

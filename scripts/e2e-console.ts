@@ -229,7 +229,6 @@ class Harness {
         id: `id-${acct}`,
         acct,
         username: acct,
-        local: true,
       }),
       resolveTitle: async (videoId: string) => ({
         videoId,

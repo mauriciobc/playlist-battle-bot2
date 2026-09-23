@@ -130,7 +130,6 @@ describe("Phase 7 — edge cases + resilience", () => {
         id: `id-${acct}`,
         acct,
         username: acct,
-        local: true,
       })),
       resolveTitle: vi.fn(async (videoId: string) => ({
         videoId,
