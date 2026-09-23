@@ -38,7 +38,7 @@ function localPart(handle: string): string {
  * Returns CreateCommand (ok or {error}) when the bot is mentioned with newgame,
  * or null when this text is not a create command for this bot.
  */
-export function parseCreateCommand(text: string, botAcct: string): CreateCommand | null {
+export function parseCreateCommand(text: string, botAcct: string, instanceDomain?: string): CreateCommand | null {
   const mentions = extractMentions(text);
   if (!mentions.some((m) => localPart(m).toLowerCase() === botAcct.toLowerCase())) return null;
 
@@ -87,13 +87,15 @@ export function parseCreateCommand(text: string, botAcct: string): CreateCommand
     return { error: m().cmdLengthRange() };
   }
 
+  const botFull = instanceDomain
+    ? botAcct.toLowerCase() + "@" + instanceDomain.toLowerCase()
+    : botAcct.toLowerCase();
   const challengers = extractMentions(afterLen).filter(
     (c) => {
       const mentionLower = c.toLowerCase();
-      const botLower = botAcct.toLowerCase();
-      // Filter the bot itself: bare @bot (same instance) and @bot@same.domain
+      // Filter the bot itself: bare @bot and @bot@bot's-instance
       // but allow @bot@other.instance (different person, same local part)
-      return mentionLower !== botLower && !mentionLower.startsWith(botLower + "@");
+      return mentionLower !== botAcct.toLowerCase() && mentionLower !== botFull;
     },
   );
 

@@ -215,7 +215,7 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
     return handleStatus(input, deps, text);
   }
 
-  const cmd = parseCreateCommand(text, deps.botAcct);
+  const cmd = parseCreateCommand(text, deps.botAcct, deps.instanceDomain);
   if (cmd === null) return { handled: false, reason: "not a command" };
 
   if ("error" in cmd) {
