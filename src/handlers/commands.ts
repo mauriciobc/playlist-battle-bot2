@@ -167,6 +167,10 @@ export function htmlToText(html: string): string {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>\s*<p>/g, "\n\n")
+    // Preserve Mastodon mention structure: the @ is outside <span> inside <a class="mention">
+    // Convert <a ...class="...mention...">@<span>user@domain</span></a> → @user@domain
+    .replace(/<a[^>]*class="[^"]*mention[^"]*"[^>]*>@?<span[^>]*>([^<]+)<\/span><\/a>/gi, "@$1")
+    .replace(/<a[^>]*class="[^"]*mention[^"]*"[^>]*>([^<]+)<\/a>/gi, "$1")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
