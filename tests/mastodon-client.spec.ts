@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MastodonClient } from "../src/mastodon/client.js";
+import type { Logger } from "../src/logger.js";
 
 type FetchCall = { url: string; init: RequestInit | undefined };
 
@@ -8,6 +9,18 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
     status,
     headers: { "content-type": "application/json", ...headers },
   });
+}
+
+function mockLogger() {
+  return {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    trace: vi.fn(),
+    child: vi.fn(),
+  };
 }
 
 describe("MastodonClient", () => {
@@ -154,5 +167,71 @@ describe("MastodonClient", () => {
     );
     expect(data).toEqual([{ id: "1" }]);
     expect(linkNext).toBe("https://mastodon.example/api/v1/notifications?max_id=99");
+  });
+
+  it("logs successful requests at debug with method/path/status", async () => {
+    const log = mockLogger();
+    client = new MastodonClient({
+      baseUrl: "https://mastodon.example",
+      token: "tok",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      log: log as unknown as Logger,
+    });
+    await client.get("/api/v1/accounts/verify_credentials");
+    expect(log.debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "GET",
+        path: "/api/v1/accounts/verify_credentials",
+        status: 200,
+      }),
+      "mastodon request ok",
+    );
+  });
+
+  it("logs retries at warn and never logs the bearer token", async () => {
+    vi.useFakeTimers();
+    const log = mockLogger();
+    client = new MastodonClient({
+      baseUrl: "https://mastodon.example",
+      token: "super-secret-token",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      log: log as unknown as Logger,
+    });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "slow down" }, 429, { "Retry-After": "0" }))
+      .mockResolvedValueOnce(jsonResponse({ id: "2" }));
+
+    const promise = client.get("/api/v1/statuses/1");
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toEqual({ id: "2" });
+
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "rate_limit", method: "GET" }),
+      "mastodon request retry",
+    );
+    const serialized = JSON.stringify({
+      debug: log.debug.mock.calls,
+      warn: log.warn.mock.calls,
+      error: log.error.mock.calls,
+    });
+    expect(serialized).not.toContain("super-secret-token");
+  });
+
+  it("logs request failures at error", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "Record not found" }, 404));
+    const log = mockLogger();
+    client = new MastodonClient({
+      baseUrl: "https://mastodon.example",
+      token: "tok",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      log: log as unknown as Logger,
+    });
+    await expect(client.get("/api/v1/statuses/nope")).rejects.toMatchObject({
+      name: "MastodonApiError",
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ method: "GET", path: "/api/v1/statuses/nope" }),
+      "mastodon request failed",
+    );
   });
 });

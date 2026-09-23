@@ -65,6 +65,12 @@ const envSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace"])
     .default("info"),
+  // Human-readable colorized logs (needs pino-pretty; JSON fallback otherwise).
+  LOG_PRETTY: z
+    .string()
+    .optional()
+    .default("0")
+    .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
   LOCALE: z.enum(["en", "pt-BR"]).default("en"),
 });
 
@@ -88,6 +94,8 @@ export type BotConfig = {
   ytPlaylistPrivacy: PlaylistPrivacy;
   dbPath: string;
   logLevel: z.infer<typeof envSchema>["LOG_LEVEL"];
+  /** Pretty-print logs when pino-pretty is installed (local dev). */
+  logPretty: boolean;
   locale: z.infer<typeof envSchema>["LOCALE"];
   /**
    * True when the configured auto-delete window cannot comfortably cover the
@@ -141,6 +149,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     ytPlaylistPrivacy: e.YT_PLAYLIST_PRIVACY,
     dbPath: e.DB_PATH,
     logLevel: e.LOG_LEVEL,
+    logPretty: e.LOG_PRETTY,
     locale: e.LOCALE,
     autoDeleteUnsafe,
   };

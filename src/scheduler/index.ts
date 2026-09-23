@@ -60,6 +60,7 @@ export async function checkDeadlines(deps: SchedulerDeps): Promise<void> {
     )
     .all(nowIso) as { id: string }[];
 
+  let expiredGames = 0;
   for (const { id } of invited) {
     const acceptedChallengers = db
       .prepare(
@@ -68,6 +69,7 @@ export async function checkDeadlines(deps: SchedulerDeps): Promise<void> {
       .get(id) as { c: number } | undefined;
 
     if ((acceptedChallengers?.c ?? 0) === 0) {
+      expiredGames += 1;
       db.prepare("UPDATE games SET status = 'EXPIRED', updated_at = ? WHERE id = ?").run(nowIso, id);
       const game = loadGame(db, id);
       if (game) await postSideEffect(handler.client, game, "expired");
@@ -94,7 +96,9 @@ export async function checkDeadlines(deps: SchedulerDeps): Promise<void> {
     )
     .all(nowIso) as { id: string }[];
 
+  let finalizedGames = 0;
   for (const { id } of collecting) {
+    finalizedGames += 1;
     await finalizeCollecting(handler, id, now());
   }
 
@@ -108,9 +112,21 @@ export async function checkDeadlines(deps: SchedulerDeps): Promise<void> {
     )
     .all() as { game_id: string; number: number }[];
 
+  let reemittedRounds = 0;
   for (const row of announced) {
+    reemittedRounds += 1;
     await emitRound(handler, row.game_id, row.number);
   }
+
+  handler.logger?.debug(
+    {
+      expiredGames,
+      pendingChallengerExpiry: pastAcceptance.length,
+      finalizedGames,
+      reemittedRounds,
+    },
+    "deadline sweep complete",
+  );
 }
 
 async function finalizeCollecting(handler: HandlerDeps, gameId: string, now: Date): Promise<void> {
@@ -243,6 +259,15 @@ export async function checkPolls(deps: SchedulerDeps): Promise<void> {
   if (deps.earlyClose?.enabled) {
     await checkStagnantPolls(deps, deps.earlyClose, nowDate);
   }
+
+  handler.logger?.debug(
+    {
+      cleanedTerminal: cleanedRounds.length,
+      dueExpired: due.length,
+      earlyClose: deps.earlyClose?.enabled ?? false,
+    },
+    "poll sweep complete",
+  );
 }
 
 /**
@@ -719,4 +744,13 @@ export async function resumeOpenGames(deps: SchedulerDeps): Promise<void> {
   for (const { id } of finales) {
     await emitFinale(handler, id);
   }
+
+  handler.logger?.debug(
+    {
+      readyStuck: readies.length,
+      inFlightRounds: roundGames.length,
+      stuckFinales: finales.length,
+    },
+    "game recovery sweep complete",
+  );
 }

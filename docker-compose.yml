@@ -4,7 +4,13 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
-    env_file: .env
+    # Portainer creates stack.env from the UI; local runs use .env.
+    # Both optional so either path can deploy alone.
+    env_file:
+      - path: stack.env
+        required: false
+      - path: .env
+        required: false
     environment:
       DB_PATH: /app/data/bot.db
     logging:

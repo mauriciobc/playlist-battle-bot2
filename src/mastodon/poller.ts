@@ -34,6 +34,11 @@ export async function pollNotifications(deps: HandlerDeps): Promise<void> {
       continue;
     }
 
+    deps.logger?.debug(
+      { count: notifications.length, page: visited.size, sinceId: cursor.lastId },
+      "fetched notifications",
+    );
+
     const sorted = [...notifications].sort((a, b) => {
       try {
         return Number(BigInt(a.id) - BigInt(b.id));
@@ -49,7 +54,13 @@ export async function pollNotifications(deps: HandlerDeps): Promise<void> {
     nextPath = response.linkNext;
   }
 
-  if (current.lastId !== cursor.lastId) writeCursor(deps.db, current);
+  if (current.lastId !== cursor.lastId) {
+    deps.logger?.debug(
+      { from: cursor.lastId, to: current.lastId },
+      "notification cursor advanced",
+    );
+    writeCursor(deps.db, current);
+  }
 }
 
 type NotificationCursorDeps = Pick<HandlerDeps, "db" | "client">;

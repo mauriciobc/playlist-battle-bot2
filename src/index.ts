@@ -23,7 +23,7 @@ const RECOVERY_INTERVAL_MS = 5 * 60_000;
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const log = createLogger(config.logLevel);
+  const log = createLogger(config.logLevel, { pretty: config.logPretty });
   setLocale(config.locale);
   const db: Db = openDatabase(config.dbPath);
   migrate(db);
@@ -34,6 +34,7 @@ async function main(): Promise<void> {
     baseUrl: config.mastodonUrl,
     token: config.mastodonToken,
     db,
+    log,
   });
 
   // Fail fast on bad token / wrong instance
@@ -100,6 +101,7 @@ async function main(): Promise<void> {
   };
   // Unexpected player-facing failures keep their internals in the log only.
   deps.log = (message, detail) => log.warn({ detail }, message);
+  deps.logger = log;
 
   const earlyClose = {
     enabled: config.earlyCloseEnabled,
@@ -149,6 +151,8 @@ async function main(): Promise<void> {
       instance: instanceDomain,
       pollDurationSec: config.pollDurationSec,
       earlyClose: config.earlyCloseEnabled,
+      logLevel: config.logLevel,
+      logPretty: config.logPretty,
     },
     "playlist-battle bot running",
   );

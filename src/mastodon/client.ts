@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db/index.js";
+import type { Logger } from "../logger.js";
 import {
   createOutboxEffect,
   markOutboxFailed,
@@ -51,6 +52,8 @@ export type MastodonClientOptions = {
   requestTimeoutMs?: number;
   db?: Db;
   sleepImpl?: (ms: number) => Promise<void>;
+  /** Optional structured logger for live debugging (never logs credentials). */
+  log?: Logger;
 };
 
 export type RequestOptions = {
@@ -66,9 +69,10 @@ export class MastodonClient {
   private readonly fetchImpl: typeof fetch;
   private readonly retryBaseDelayMs: number;
   private readonly maxRetries: number;
-  private readonly requestTimeoutMs: number;
+  private   readonly requestTimeoutMs: number;
   private readonly db: Db | undefined;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly log: Logger | undefined;
 
   rateLimit: RateLimitState | null = null;
 
@@ -81,6 +85,7 @@ export class MastodonClient {
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000;
     this.db = opts.db;
     this.sleep = opts.sleepImpl ?? defaultSleep;
+    this.log = opts.log;
   }
 
   async get<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -135,6 +140,7 @@ export class MastodonClient {
     const maxRetries = options.maxRetries ?? this.maxRetries;
     let attempt = 0;
     let bypassRateLimit = false;
+    const startedAt = Date.now();
 
     try {
       for (;;) {
@@ -158,7 +164,12 @@ export class MastodonClient {
           res = await this.fetchImpl(url, merged);
         } catch (err) {
           if (attempt < maxRetries) {
-            await this.sleep(this.retryBaseDelayMs * 2 ** attempt);
+            const delayMs = this.retryBaseDelayMs * 2 ** attempt;
+            this.log?.warn(
+              { method, path, attempt: attempt + 1, delayMs, reason: "network" },
+              "mastodon request retry",
+            );
+            await this.sleep(delayMs);
             attempt += 1;
             continue;
           }
@@ -175,13 +186,28 @@ export class MastodonClient {
               // Keep the remote result successful even if ledger persistence fails.
             }
           }
+          this.log?.debug(
+            {
+              method,
+              path,
+              status: res.status,
+              attempt,
+              durationMs: Date.now() - startedAt,
+            },
+            "mastodon request ok",
+          );
           return res;
         }
 
         if (res.status === 429) {
           if (attempt < maxRetries) {
             const retryAfter = Number(res.headers.get("Retry-After") ?? "1");
-            await this.sleep(Math.max(0, retryAfter * 1000));
+            const delayMs = Math.max(0, retryAfter * 1000);
+            this.log?.warn(
+              { method, path, attempt: attempt + 1, delayMs, reason: "rate_limit" },
+              "mastodon request retry",
+            );
+            await this.sleep(delayMs);
             attempt += 1;
             bypassRateLimit = true;
             continue;
@@ -194,7 +220,12 @@ export class MastodonClient {
         }
 
         if (res.status >= 500 && attempt < maxRetries) {
-          await this.sleep(this.retryBaseDelayMs * 2 ** attempt);
+          const delayMs = this.retryBaseDelayMs * 2 ** attempt;
+          this.log?.warn(
+            { method, path, status: res.status, attempt: attempt + 1, delayMs, reason: "server_error" },
+            "mastodon request retry",
+          );
+          await this.sleep(delayMs);
           attempt += 1;
           continue;
         }
@@ -202,6 +233,23 @@ export class MastodonClient {
         throw new MastodonApiError(res.status, await safeJson(res));
       }
     } catch (err) {
+      if (err instanceof RateLimitError) {
+        this.log?.warn(
+          { method, path, resetAt: err.resetAt, durationMs: Date.now() - startedAt },
+          "mastodon rate limit exhausted",
+        );
+      } else {
+        this.log?.error(
+          {
+            method,
+            path,
+            attempt,
+            durationMs: Date.now() - startedAt,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "mastodon request failed",
+        );
+      }
       if (this.db && effectId) {
         const status = err instanceof MastodonApiError && err.status < 500 ? "failed" : "unknown";
         try {

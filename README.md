@@ -39,6 +39,20 @@ npm start
 
 `npm start` runs the compiled `dist/index.js`, so run `npm run build` first. `npm run dev` starts the TypeScript watcher and also requires environment variables to be present in the process environment.
 
+## Live debugging
+
+Logs are structured JSON (pino). For live/staging troubleshooting:
+
+- `LOG_LEVEL=debug` traces notification fetch/classify/handle outcomes, every Mastodon HTTP request (method, path, status, duration, retries), and scheduler sweeps (deadlines, polls, recovery).
+- `LOG_PRETTY=1` colorizes output for local runs via `pino-pretty` (devDependency). Production images fall back to JSON if it is not installed.
+- Sensitive fields (`token`, cookies, `Authorization`) are redacted automatically.
+
+Example local run:
+
+```bash
+LOG_LEVEL=debug LOG_PRETTY=1 npm run dev
+```
+
 ## Commands
 
 - Public: `@bot newgame "<theme>" 8-12 @challenger [@challenger...]`

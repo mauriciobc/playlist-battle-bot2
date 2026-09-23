@@ -1,6 +1,7 @@
 import { NON_TERMINAL_STATUS_SQL, type Db } from "../db/index.js";
 import { MastodonApiError, RateLimitError } from "../mastodon/client.js";
 import type { MastodonClient, RequestOptions } from "../mastodon/client.js";
+import type { Logger } from "../logger.js";
 import { classifyNotification, type RawNotification } from "../mastodon/notifications.js";
 import { sourceStatuses } from "../game/stateMachine.js";
 import {
@@ -80,6 +81,11 @@ export type HandlerDeps = {
    * (oEmbed/SQLite internals). Optional so tests can omit it.
    */
   log?: (message: string, detail?: unknown) => void;
+  /**
+   * Structured leveled logger for live debugging (notification flow, sweeps).
+   * Optional so tests can omit it.
+   */
+  logger?: Logger;
 };
 
 export type CommandInput = {
@@ -823,7 +829,13 @@ function isRetryableNotificationError(err: unknown): boolean {
 
 export async function processNotification(n: RawNotification, deps: HandlerDeps): Promise<void> {
   const classified = classifyNotification(n, deps.botAcct);
-  if (!classified) return;
+  if (!classified) {
+    deps.logger?.debug(
+      { notificationId: n.id, type: n.type },
+      "notification skipped: not addressed to bot",
+    );
+    return;
+  }
 
   // Claim before handling: an overlapping run sees the row and skips, so one
   // notification can never be handled twice. Released on failure so the next
@@ -833,11 +845,27 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
   const claim = deps.db
     .prepare("INSERT OR IGNORE INTO processed_notifications (notification_id, processed_at) VALUES (?, '')")
     .run(n.id);
-  if (claim.changes === 0) return;
+  if (claim.changes === 0) {
+    deps.logger?.debug(
+      { notificationId: n.id, kind: classified.kind },
+      "notification skipped: already claimed or processed",
+    );
+    return;
+  }
+
+  deps.logger?.debug(
+    {
+      notificationId: n.id,
+      kind: classified.kind,
+      ...(classified.kind !== "poll_expired" ? { from: classified.accountAcct } : {}),
+    },
+    "notification claimed",
+  );
 
   try {
+    let result: HandlerResult;
     if (classified.kind === "public_command") {
-      await handlePublicCommand(
+      result = await handlePublicCommand(
         {
           accountId: classified.accountId,
           accountAcct: classified.accountAcct,
@@ -849,7 +877,7 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
         deps,
       );
     } else if (classified.kind === "dm") {
-      await handleDm(
+      result = await handleDm(
         {
           accountId: classified.accountId,
           accountAcct: classified.accountAcct,
@@ -859,9 +887,20 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
         },
         deps,
       );
-    } else if (classified.kind === "poll_expired") {
+    } else {
       await deps.onPollExpired?.(classified.statusId);
+      result = { handled: true, kind: "poll_expired" };
     }
+
+    deps.logger?.info(
+      {
+        notificationId: n.id,
+        kind: classified.kind,
+        ...(classified.kind !== "poll_expired" ? { from: classified.accountAcct } : {}),
+        result,
+      },
+      "notification handled",
+    );
 
     clearNotificationFailure(deps.db, n.id);
     deps.db
@@ -905,8 +944,22 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
         attempts: attemptCount,
         err: errorText,
       });
+      deps.logger?.error(
+        { notificationId: n.id, kind: classified.kind, attempts: attemptCount, err: errorText },
+        "notification dead-lettered",
+      );
       return;
     }
+    deps.logger?.warn(
+      {
+        notificationId: n.id,
+        kind: classified.kind,
+        attempts: attemptCount,
+        rateLimited,
+        err: errorText,
+      },
+      "notification failed; will retry",
+    );
     deps.db.prepare("DELETE FROM processed_notifications WHERE notification_id = ?").run(n.id);
     throw err;
   }

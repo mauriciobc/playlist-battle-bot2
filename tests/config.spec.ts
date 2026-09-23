@@ -122,6 +122,15 @@ describe("loadConfig", () => {
     expect(() => cfg({ LOG_LEVEL: "verbose" })).toThrow(/LOG_LEVEL/);
   });
 
+  it("parses LOG_PRETTY as a boolean flag (default off)", () => {
+    expect(cfg().logPretty).toBe(false);
+    expect(cfg({ LOG_PRETTY: undefined }).logPretty).toBe(false);
+    expect(cfg({ LOG_PRETTY: "1" }).logPretty).toBe(true);
+    expect(cfg({ LOG_PRETTY: "true" }).logPretty).toBe(true);
+    expect(cfg({ LOG_PRETTY: "0" }).logPretty).toBe(false);
+    expect(cfg({ LOG_PRETTY: "false" }).logPretty).toBe(false);
+  });
+
   it("rejects non-integer numeric fields", () => {
     expect(() => cfg({ POLL_DURATION_SEC: "abc" })).toThrow(/POLL_DURATION_SEC/);
     expect(() => cfg({ MAX_GAMES_PER_PLAYER: "2.5" })).toThrow(/MAX_GAMES_PER_PLAYER/);
