@@ -377,6 +377,10 @@ export async function handleDm(input: CommandInput, deps: HandlerDeps): Promise<
     return handleReplace(input, deps, reply_.position, reply_.url);
   }
 
+  deps.logger?.debug(
+    { accountId: input.accountId, text: text.slice(0, 200) },
+    "unrecognized DM text",
+  );
   await dmTo(
     deps,
     input.accountId,

@@ -109,6 +109,27 @@ describe("parseDmReply (accept/decline/cancel/links)", () => {
     expect(parseDmReply("Accept!")).toEqual({ kind: "accept" });
   });
 
+  it("strips leading @bot mention (Mastodon reply/compose prefix)", () => {
+    expect(parseDmReply("@playlistbattle accept")).toEqual({ kind: "accept" });
+    expect(parseDmReply("@playlistbattle@mastodon.example accept")).toEqual({ kind: "accept" });
+    expect(parseDmReply("@playlistbattle\naccept")).toEqual({ kind: "accept" });
+    expect(parseDmReply("<p>@playlistbattle accept</p>".replace(/<[^>]+>/g, ""))).toEqual({
+      kind: "accept",
+    });
+    expect(parseDmReply("@playlistbattle decline")).toEqual({ kind: "decline" });
+    expect(parseDmReply("@playlistbattle cancel")).toEqual({ kind: "cancel" });
+  });
+
+  it("strips leading mention before links and replace", () => {
+    expect(parseDmReply("@playlistbattle https://youtu.be/dQw4w9WgXcQ")).toEqual({
+      kind: "links",
+      urls: ["https://youtu.be/dQw4w9WgXcQ"],
+    });
+    expect(
+      parseDmReply("@playlistbattle replace 3 https://youtu.be/dQw4w9WgXcQ"),
+    ).toMatchObject({ kind: "replace", position: 3 });
+  });
+
   it("parses decline", () => {
     expect(parseDmReply("decline")).toEqual({ kind: "decline" });
     expect(parseDmReply("Decline")).toEqual({ kind: "decline" });

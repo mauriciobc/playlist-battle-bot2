@@ -124,8 +124,17 @@ const URL_RE = /https?:\/\/[^\s<>"']+/gi;
 /** v1.1 1.6: `replace <n> <url>` — case-insensitive, position 1..99. */
 const REPLACE_RE = /^replace\s+(\d{1,2})\s+(https?:\/\/\S+)/i;
 
+/**
+ * Mastodon DMs almost always start with `@bot` (reply prefix or compose mention).
+ * Strip leading mentions + zero-width chars so `@bot accept` parses as `accept`.
+ */
+function normalizeDmText(text: string): string {
+  const noZw = text.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  return stripLeadingMentions(noZw.trim()).trim();
+}
+
 export function parseDmReply(text: string): DmReply {
-  const t = text.trim();
+  const t = normalizeDmText(text);
   if (/^accept\b/i.test(t)) return { kind: "accept" };
   if (/^decline\b/i.test(t)) return { kind: "decline" };
   if (/^cancel\b/i.test(t)) return { kind: "cancel" };
