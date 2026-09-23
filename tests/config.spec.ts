@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig, type BotConfig } from "../src/config.js";
+import { loadConfig, readLogSettings, type BotConfig } from "../src/config.js";
 
 const validEnv: NodeJS.ProcessEnv = {
   MASTODON_URL: "https://mastodon.example",
@@ -33,7 +33,6 @@ describe("loadConfig", () => {
     expect(c.replacementGraceMin).toBe(15);
     expect(c.autoDeleteWindowHours).toBe(720);
     expect(c.dbPath).toBe("./data/bot.db");
-    expect(c.logLevel).toBe("info");
   });
 
   it("applies documented defaults when optional keys are absent", () => {
@@ -61,7 +60,6 @@ describe("loadConfig", () => {
     expect(c.earlyCloseStagnationSec).toBe(300);
     expect(c.autoDeleteWindowHours).toBe(0);
     expect(c.dbPath).toBe("./data/bot.db");
-    expect(c.logLevel).toBe("info");
   });
 
   it("parses EARLY_CLOSE_ENABLED as a boolean flag", () => {
@@ -123,12 +121,19 @@ describe("loadConfig", () => {
   });
 
   it("parses LOG_PRETTY as a boolean flag (default off)", () => {
-    expect(cfg().logPretty).toBe(false);
-    expect(cfg({ LOG_PRETTY: undefined }).logPretty).toBe(false);
-    expect(cfg({ LOG_PRETTY: "1" }).logPretty).toBe(true);
-    expect(cfg({ LOG_PRETTY: "true" }).logPretty).toBe(true);
-    expect(cfg({ LOG_PRETTY: "0" }).logPretty).toBe(false);
-    expect(cfg({ LOG_PRETTY: "false" }).logPretty).toBe(false);
+    expect(readLogSettings({}).pretty).toBe(false);
+    expect(readLogSettings({ LOG_PRETTY: undefined }).pretty).toBe(false);
+    expect(readLogSettings({ LOG_PRETTY: "1" }).pretty).toBe(true);
+    expect(readLogSettings({ LOG_PRETTY: "true" }).pretty).toBe(true);
+    expect(readLogSettings({ LOG_PRETTY: "0" }).pretty).toBe(false);
+    expect(readLogSettings({ LOG_PRETTY: "false" }).pretty).toBe(false);
+  });
+
+  it("reads the boot log level tolerantly, so an invalid one cannot silence startup", () => {
+    expect(readLogSettings({}).level).toBe("info");
+    expect(readLogSettings({ LOG_LEVEL: "debug" }).level).toBe("debug");
+    expect(readLogSettings({ LOG_LEVEL: "verbose" }).level).toBe("info");
+    expect(readLogSettings({ LOG_LEVEL: "" }).level).toBe("info");
   });
 
   it("rejects non-integer numeric fields", () => {

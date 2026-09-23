@@ -16,6 +16,33 @@ const intFromEnv = (min: number, max?: number) =>
         : z.number().int().min(min).max(max),
     );
 
+/** Log levels pino accepts; single source for schema validation and boot. */
+export const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace"] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+// Boolean env flags: "1"/"true" on, "0"/"false" off. The boot reader below
+// parses it through this same schema, so LOG_PRETTY cannot mean two things.
+const envFlag = z
+  .string()
+  .optional()
+  .default("0")
+  .transform((value) => value !== "0" && value.toLowerCase() !== "false");
+
+/**
+ * Log settings for the boot identity line. Deliberately tolerant: it runs
+ * before `loadConfig`, so a malformed LOG_LEVEL must fall back to "info"
+ * rather than throw or silence the line that identifies the running build.
+ */
+export function readLogSettings(env: NodeJS.ProcessEnv = process.env): {
+  level: LogLevel;
+  pretty: boolean;
+} {
+  return {
+    level: LOG_LEVELS.find((candidate) => candidate === env.LOG_LEVEL) ?? "info",
+    pretty: envFlag.parse(env.LOG_PRETTY),
+  };
+}
+
 const envSchema = z.object({
   MASTODON_URL: z
     .string()
@@ -62,15 +89,11 @@ const envSchema = z.object({
   YT_PLAYLIST_PRIVACY: z.enum(["PUBLIC", "PRIVATE", "UNLISTED"]).default("PUBLIC"),
 
   DB_PATH: z.string().min(1).default("./data/bot.db"),
-  LOG_LEVEL: z
-    .enum(["fatal", "error", "warn", "info", "debug", "trace"])
-    .default("info"),
+  // Validated so a typo fails the boot loudly; readLogSettings() reads the same
+  // values tolerantly, before validation, for the build-identity line.
+  LOG_LEVEL: z.enum(LOG_LEVELS).default("info"),
   // Human-readable colorized logs (needs pino-pretty; JSON fallback otherwise).
-  LOG_PRETTY: z
-    .string()
-    .optional()
-    .default("0")
-    .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
+  LOG_PRETTY: envFlag,
   LOCALE: z.enum(["en", "pt-BR"]).default("en"),
 });
 
@@ -93,9 +116,6 @@ export type BotConfig = {
   ytAuthUser: number;
   ytPlaylistPrivacy: PlaylistPrivacy;
   dbPath: string;
-  logLevel: z.infer<typeof envSchema>["LOG_LEVEL"];
-  /** Pretty-print logs when pino-pretty is installed (local dev). */
-  logPretty: boolean;
   locale: z.infer<typeof envSchema>["LOCALE"];
   /**
    * True when the configured auto-delete window cannot comfortably cover the
@@ -148,8 +168,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     ytAuthUser: e.YT_AUTH_USER,
     ytPlaylistPrivacy: e.YT_PLAYLIST_PRIVACY,
     dbPath: e.DB_PATH,
-    logLevel: e.LOG_LEVEL,
-    logPretty: e.LOG_PRETTY,
     locale: e.LOCALE,
     autoDeleteUnsafe,
   };

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { loadConfig } from "./config.js";
+import { loadConfig, readLogSettings } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createLoopRunner } from "./singleFlight.js";
 import { setLocale } from "./i18n/index.js";
@@ -23,14 +23,16 @@ const SCHEDULER_INTERVAL_MS = 60_000;
 const RECOVERY_INTERVAL_MS = 5 * 60_000;
 
 async function main(): Promise<void> {
-  const config = loadConfig();
-  const log = createLogger(config.logLevel, { pretty: config.logPretty });
-  // First line after the logger exists: unambiguous build identity in every
-  // deploy's logs (Portainer, docker logs, CI) before any other work can fail.
+  // Log settings and the build identity come first: a malformed or missing
+  // stack.env is the most common fresh-deploy failure, and it must not hide
+  // which build is deployed (Portainer, docker logs, CI).
+  const logSettings = readLogSettings();
+  const log = createLogger(logSettings.level, { pretty: logSettings.pretty });
   log.info(
     { version: APP_VERSION, gitSha: GIT_SHA, node: process.version },
     `playlist-battle bot ${VERSION_STAMP} starting`,
   );
+  const config = loadConfig();
   setLocale(config.locale);
   const db: Db = openDatabase(config.dbPath);
   migrate(db);
@@ -159,8 +161,8 @@ async function main(): Promise<void> {
       instance: instanceDomain,
       pollDurationSec: config.pollDurationSec,
       earlyClose: config.earlyCloseEnabled,
-      logLevel: config.logLevel,
-      logPretty: config.logPretty,
+      logLevel: logSettings.level,
+      logPretty: logSettings.pretty,
     },
     "playlist-battle bot running",
   );
