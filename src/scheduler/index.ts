@@ -675,6 +675,7 @@ async function resumeCreatedGames(deps: SchedulerDeps): Promise<void> {
           text,
           player.acct,
           { idempotencyKey: `pb:v1:creation:${game.id}:invite:${player.accountId}` },
+          handler.instanceDomain,
         );
         handler.db
           .prepare("UPDATE players SET invite_sent_at = ? WHERE game_id = ? AND account_id = ?")

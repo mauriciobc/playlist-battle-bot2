@@ -102,8 +102,8 @@ describe("handlers integration", () => {
     // DMs use direct visibility
     const dmBodies = posts.slice(1).map((p) => p.body as { visibility: string; status: string });
     expect(dmBodies.every((b) => b.visibility === "direct")).toBe(true);
-    expect(dmBodies[0]!.status).toMatch(/^@alice\b/);
-    expect(dmBodies[1]!.status).toMatch(/^@bob\b/);
+    expect(dmBodies[0]!.status).toMatch(/^@alice@mastodon\.example\b/);
+    expect(dmBodies[1]!.status).toMatch(/^@bob@mastodon\.example\b/);
 
     const games = db.prepare("SELECT * FROM games").all() as { id: string; status: string }[];
     expect(games).toHaveLength(1);

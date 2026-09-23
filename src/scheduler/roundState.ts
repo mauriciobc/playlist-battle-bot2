@@ -371,6 +371,9 @@ async function ensureAvailability(
           handler.client,
           accountId,
           m().replaceTuneDm(tune.position, round, tune.title, deadline),
+          undefined,
+          {},
+          handler.instanceDomain,
         );
         notified.push(accountId);
         prompts[accountId] = promptId;
@@ -430,6 +433,9 @@ async function ensureAvailability(
             tune.title,
             meta.deadline ?? new Date(deadlineMs).toISOString(),
           ),
+          undefined,
+          {},
+          handler.instanceDomain,
         );
         delivered.add(accountId);
         prompts[accountId] = promptId;

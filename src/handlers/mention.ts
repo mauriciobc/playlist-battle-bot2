@@ -126,7 +126,7 @@ function dmTo(
   fallbackAcct?: string,
   options: RequestOptions = {},
 ): Promise<string> {
-  return dm(deps.db, deps.client, accountId, text, fallbackAcct, options);
+  return dm(deps.db, deps.client, accountId, text, fallbackAcct, options, deps.instanceDomain);
 }
 
 async function resumeCreation(
