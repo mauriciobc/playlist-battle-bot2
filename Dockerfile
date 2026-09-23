@@ -14,6 +14,10 @@ RUN npm run build && npm prune --omit=dev
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Git commit stamped at image build (compose passes build.args.GIT_SHA);
+# also overridable at runtime via GIT_SHA in stack.env / .env.
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
 # Reuse the already-resolved/pruned tree from build (avoids a second npm ci
 # against better-sqlite3, which is what failed on slim runtimes before).
 COPY --from=build /app/node_modules ./node_modules

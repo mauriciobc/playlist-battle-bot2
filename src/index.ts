@@ -16,6 +16,7 @@ import {
 import type { HandlerDeps } from "./handlers/mention.js";
 import { resolveTitle, checkAvailable } from "./youtube/oembed.js";
 import { createBattlePlaylistPublisher } from "./youtube/playlist.js";
+import { APP_VERSION, GIT_SHA, VERSION_STAMP } from "./version.js";
 
 const NOTIFICATION_INTERVAL_MS = 15_000;
 const SCHEDULER_INTERVAL_MS = 60_000;
@@ -24,6 +25,12 @@ const RECOVERY_INTERVAL_MS = 5 * 60_000;
 async function main(): Promise<void> {
   const config = loadConfig();
   const log = createLogger(config.logLevel, { pretty: config.logPretty });
+  // First line after the logger exists: unambiguous build identity in every
+  // deploy's logs (Portainer, docker logs, CI) before any other work can fail.
+  log.info(
+    { version: APP_VERSION, gitSha: GIT_SHA, node: process.version },
+    `playlist-battle bot ${VERSION_STAMP} starting`,
+  );
   setLocale(config.locale);
   const db: Db = openDatabase(config.dbPath);
   migrate(db);
@@ -146,6 +153,8 @@ async function main(): Promise<void> {
 
   log.info(
     {
+      version: APP_VERSION,
+      gitSha: GIT_SHA,
       bot: me.username,
       instance: instanceDomain,
       pollDurationSec: config.pollDurationSec,
