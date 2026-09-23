@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+.ENV
+.env_*
+.ENV_*
+!.env.example
+!.ENV.example
+coverage/
+*.log
+*.pid
