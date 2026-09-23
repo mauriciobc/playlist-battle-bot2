@@ -63,6 +63,15 @@ describe("parseCreateCommand", () => {
     expect(r).toMatchObject({ error: expect.stringContaining("8") });
   });
 
+
+  it("allows cross-instance same-handle as challenger (different person)", () => {
+    const r = parseCreateCommand(
+      `@${BOT} newgame "X" 8 @${BOT}@other.instance`,
+      BOT,
+    );
+    expect(r).toMatchObject({ theme: "X", challengers: [`${BOT}@other.instance`] });
+  });
+
   it("returns error result when no challengers", () => {
     const r = parseCreateCommand(`@${BOT} newgame "X" 8`, BOT);
     expect(r).toMatchObject({ error: expect.stringMatching(/challenger/i) });

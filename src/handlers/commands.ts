@@ -88,7 +88,13 @@ export function parseCreateCommand(text: string, botAcct: string): CreateCommand
   }
 
   const challengers = extractMentions(afterLen).filter(
-    (c) => localPart(c).toLowerCase() !== botAcct.toLowerCase(),
+    (c) => {
+      const mentionLower = c.toLowerCase();
+      const botLower = botAcct.toLowerCase();
+      // Filter the bot itself: bare @bot (same instance) and @bot@same.domain
+      // but allow @bot@other.instance (different person, same local part)
+      return mentionLower !== botLower && !mentionLower.startsWith(botLower + "@");
+    },
   );
 
   if (challengers.length === 0) {
