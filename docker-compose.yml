@@ -7,6 +7,10 @@ services:
         # is running. Set GIT_SHA=$(git rev-parse --short HEAD) in .env/stack.env
         # (or leave unset → "dev").
         GIT_SHA: ${GIT_SHA:-dev}
+    # Without this, `docker compose up -d` (and Portainer's stack update) reuses
+    # the image already on the host and silently keeps running the previous
+    # commit's code. Always rebuild from the checked-out source on up.
+    pull_policy: build
     restart: unless-stopped
     init: true
     stop_grace_period: 30s

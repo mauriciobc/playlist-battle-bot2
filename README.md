@@ -72,6 +72,8 @@ docker compose build
 docker compose up -d
 ```
 
+The service is pinned to `pull_policy: build`, so `docker compose up -d` (including a Portainer stack update) rebuilds the image from the checked-out source instead of reusing the image already on the host. Verify the running build in the logs: the first line must read `playlist-battle bot <version> (<GIT_SHA>) starting`. Set `GIT_SHA` in `.env`/`stack.env` to the deployed commit or it logs `dev`. If that line is missing, the container is running an older image.
+
 The Compose deployment stores SQLite at `/app/data/bot.db` in the `bot-data` volume. Back up the volume before upgrades or destructive operations.
 
 The image runs an internal health check that requires fresh heartbeats for the notification, deadline, poll, and recovery loops. There is no public HTTP health endpoint. Monitor the process, structured logs, database file, and scheduler activity externally. A failed loop should be investigated before allowing the container to continue unattended.
