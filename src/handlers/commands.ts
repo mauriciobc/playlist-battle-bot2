@@ -43,10 +43,7 @@ export function parseCreateCommand(text: string, botAcct: string, instanceDomain
   if (!mentions.some((m) => localPart(m).toLowerCase() === botAcct.toLowerCase())) return null;
 
   const withoutMentions = stripLeadingMentions(text);
-  // Also drop mid-text bot mentions
-  const cleaned = withoutMentions
-    .replace(new RegExp(`@${botAcct}(?![A-Za-z0-9_])`, "gi"), "")
-    .trim();
+  const cleaned = withoutMentions.trim();
 
   if (!/^newgame\b/i.test(cleaned)) return null;
 
