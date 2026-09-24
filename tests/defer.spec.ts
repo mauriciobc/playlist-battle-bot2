@@ -35,7 +35,6 @@ describe("deferUntilNotifications", () => {
       "Mastodon rate limit exhausted",
       "2026-09-24T14:05:00.000Z",
       null,
-      now,
     );
     expect(deferUntilNotifications(db, now).has("622936484")).toBe(true);
   });
@@ -49,7 +48,6 @@ describe("deferUntilNotifications", () => {
       "Mastodon rate limit exhausted",
       "2026-09-24T14:05:00.000Z",
       null,
-      new Date("2026-09-24T14:00:00.000Z"),
     );
     const later = new Date("2026-09-24T14:06:00.000Z");
     expect(deferUntilNotifications(db, later).has("622936484")).toBe(false);
@@ -65,7 +63,6 @@ describe("deferUntilNotifications", () => {
       "poison",
       "2099-01-01T00:00:00.000Z",
       "2026-09-24T14:00:00.000Z",
-      now,
     );
     expect(deferUntilNotifications(db, now).has("dead")).toBe(false);
   });
@@ -73,14 +70,14 @@ describe("deferUntilNotifications", () => {
   it("never defers a plain failure with no schedule", () => {
     const db = freshDb();
     const now = new Date("2026-09-24T14:00:00.000Z");
-    recordNotificationFailure(db, "plain", 1, "boom", null, null, now);
+    recordNotificationFailure(db, "plain", 1, "boom", null, null);
     expect(deferUntilNotifications(db, now).has("plain")).toBe(false);
   });
 
   it("leaves an unrelated notification alone", () => {
     const db = freshDb();
     const now = new Date("2026-09-24T14:00:00.000Z");
-    recordNotificationFailure(db, "a", 1, "rl", "2099-01-01T00:00:00.000Z", null, now);
+    recordNotificationFailure(db, "a", 1, "rl", "2099-01-01T00:00:00.000Z", null);
     const held = deferUntilNotifications(db, now);
     expect(held.has("a")).toBe(true);
     expect(held.has("b")).toBe(false);
