@@ -13,3 +13,4 @@ data/
 coverage/
 *.log
 *.pid
+.mock-endpoint
