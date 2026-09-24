@@ -1,5 +1,6 @@
 import type { HandlerDeps } from "../handlers/mention.js";
 import { processNotification } from "../handlers/mention.js";
+import { deferUntilNotifications } from "../game/store.js";
 import { readCursor, writeCursor } from "../db/cursor.js";
 import { advance, type RawNotification } from "./notifications.js";
 
@@ -18,6 +19,10 @@ export async function pollNotifications(deps: HandlerDeps): Promise<void> {
   let nextPath: string | null = path;
   const visited = new Set<string>();
   let current = cursor;
+
+  // Notifications rate-limited on an earlier tick. They become due once
+  // resetAt has passed; until then they are skipped, not retried.
+  const deferred = deferUntilNotifications(deps.db, deps.now());
 
   while (nextPath) {
     if (visited.has(nextPath)) {
@@ -48,6 +53,14 @@ export async function pollNotifications(deps: HandlerDeps): Promise<void> {
     });
 
     for (const n of sorted) {
+      if (deferred.has(n.id)) {
+        deps.logger?.debug(
+          { notificationId: n.id },
+          "notification deferred until its rate limit resets",
+        );
+        current = advance(n.id, current);
+        continue;
+      }
       await processNotification(n, deps);
       current = advance(n.id, current);
     }

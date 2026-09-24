@@ -352,6 +352,27 @@ export function clearNotificationFailure(db: Db, notificationId: string): void {
   db.prepare("DELETE FROM notification_failures WHERE notification_id = ?").run(notificationId);
 }
 
+/**
+ * Notification ids whose next attempt is still in the future.
+ *
+ * Rate-limited failures record next_attempt_at = resetAt so a full window
+ * can pass before the request is retried. Without a query that honours it,
+ * the poller re-ran the notification on the next tick and the deferred
+ * retry became an immediate one.
+ */
+export function deferUntilNotifications(db: Db, now: Date = new Date()): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT notification_id AS notificationId
+         FROM notification_failures
+        WHERE dead_lettered_at IS NULL
+          AND next_attempt_at IS NOT NULL
+          AND next_attempt_at > ?`,
+    )
+    .all(now.toISOString()) as Array<{ notificationId: string }>;
+  return new Set(rows.map((r) => r.notificationId));
+}
+
 export function listDeadLetteredNotifications(db: Db, limit = 100): NotificationFailure[] {
   return db
     .prepare(
