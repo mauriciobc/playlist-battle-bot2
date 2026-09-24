@@ -57,6 +57,15 @@ export class MockMastodonServer {
     this.state.registerToken(this.token, opts.botAcct);
   }
 
+  /**
+   * Give an account its own bearer token. The default token belongs to the
+   * bot, so any other account - the host posting a newgame, say - needs one
+   * to act as an author.
+   */
+  registerToken(token: string, acct: string): void {
+    this.state.registerToken(token, acct);
+  }
+
   async start(): Promise<void> {
     const server = createServer((req, res) => {
       void this.handle(req, res);
@@ -83,19 +92,17 @@ export class MockMastodonServer {
 
   /** Test hooks - not part of the Mastodon API surface. */
 
-  pushNotification(seed: SeedNotification): string {
+  pushNotification(seed: SeedNotification, recipientAcct?: string): string {
     const state = this.state;
     const account = state.addAccount(seed.fromAcct);
-    const id = state.nextId();
-    state.notifications.push({
-      id,
-      type: seed.type,
-      accountId: account.id,
-      statusId: seed.statusId ?? null,
-      createdAt: new Date().toISOString(),
-      groupKey: `ungrouped-${id}`,
-    });
-    return id;
+    const recipient = state.addAccount(recipientAcct ?? state.botAcct);
+    if (recipient.id === account.id) {
+      throw new Error("pushNotification cannot notify the author");
+    }
+    state.notifyMention(recipient.id, account.id, seed.statusId ?? "");
+    const created = state.notifications[state.notifications.length - 1];
+    if (created === undefined) throw new Error("notification was not created");
+    return created.id;
   }
 
   /** Force a poll past its expiry, the way waiting 300s otherwise would. */
@@ -247,7 +254,12 @@ export class MockMastodonServer {
     const maxId = path.searchParams.get("max_id");
     const limit = Number(path.searchParams.get("limit") ?? 40) || 40;
 
-    let items = [...this.state.notifications].reverse(); // newest first
+    // A notification is delivered to ONE account. Serving the whole queue to
+    // every caller would hand the bot the notifications meant for the player,
+    // and the bot would act on a game addressed to someone else.
+    let items = this.state.notifications
+      .filter((n) => n.recipientId === viewer.id)
+      .reverse(); // newest first
     if (sinceId) items = items.filter((n) => Number(n.id) > Number(sinceId));
     if (maxId) items = items.filter((n) => Number(n.id) < Number(maxId));
     if (excluded.size > 0) items = items.filter((n) => !excluded.has(n.type));
@@ -302,14 +314,26 @@ export class MockMastodonServer {
     // A direct status addressed to an acct forms the conversation's other
     // participant. The bot's DM check looks for the conversation, not the
     // visibility string, so the participant has to be real.
+    // Prefer the handles written in the text - that is what a real client
+    // sends and what makes parse_mentions create a notification. An explicit
+    // `mentions` array is honoured too, for callers that use it.
     const addressed = Array.isArray(input.mentions)
-      ? (input.mentions as string[])
-      : typeof input.acct === "string"
-        ? [input.acct]
-        : [];
+      ? (input.mentions as string[]).map((m) => m.replace(/^@/, ""))
+      : this.state
+          .resolveTextMentions(content)
+          .map((a) => a.acct);
     for (const raw of addressed) {
       const target = this.state.lookup(raw.replace(/^@/, ""));
-      if (target) this.state.addMention(status.id, target.id);
+      if (!target) continue;
+      this.state.addMention(status.id, target.id);
+      // A mention of an account produces a notification for that account.
+      // Without this the status exists but nothing ever consumes it: the bot
+      // is notification-driven, so a driver-posted newgame would sit unread
+      // and every run would die at "create - never happened".
+      //
+      // Upstream: PostStatusService -> Status -> parse_mentions resolves
+      // @handle against local accounts and creates the matching Notification.
+      this.state.notifyMention(target.id, viewer.id, status.id);
     }
 
     if (pollInput !== null && typeof pollInput === "object") {

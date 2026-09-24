@@ -54,7 +54,10 @@ export type MockStatus = {
 export type MockNotification = {
   id: string;
   type: string;
+  /** The account that CAUSED the notification (NotificationSerializer#account). */
   accountId: string;
+  /** The account the notification is DELIVERED to. */
+  recipientId: string;
   statusId: string | null;
   createdAt: string;
   groupKey: string;
@@ -101,15 +104,66 @@ export class MockState {
     this.mentions.set(statusId, list);
   }
 
+  /**
+   * Resolve @handles written in a status body to local accounts.
+   *
+   * On real Mastodon this is StatusFilter/extract_mentions scanning the
+   * rendered content: an @username or @username@host at a word boundary
+   * becomes a Mention, and a mention notifies the account. Clients do NOT
+   * send a separate mentions parameter - the handle lives in the text - which
+   * is why the mock had to parse it. Without this a newgame posted as
+   * `@bot newgame ...` produced a status that nobody was ever notified about.
+   *
+   * Deliberately conservative: an @ not followed by a plausible handle is
+   * ignored, so prose like "email me @ home" produces no notification. An
+   * unknown host is simply not a local account, and is skipped.
+   */
+  resolveTextMentions(text: string): MockAccount[] {
+    const found = new Map<string, MockAccount>();
+    // username = [a-z0-9_]+ (Mastodon's USERNAME_PATTERN), optional @host.
+    const pattern = /(?:^|[^\w/])@([a-z0-9_]+(?:@[a-z0-9.-]+)?)/gi;
+    for (const match of text.matchAll(pattern)) {
+      const raw = match[1];
+      if (raw === undefined) continue;
+      const account = this.lookup(raw);
+      if (account) found.set(account.id, account);
+    }
+    return [...found.values()];
+  }
+
+  /**
+   * Record a mention notification for `targetId`, caused by `authorId`
+   * mentioning them in `statusId`.
+   *
+   * NotificationSerializer renders type, the author as :account, and the
+   * mentioning status as :status, which status_type? permits for "mention".
+   */
+  notifyMention(targetId: string, authorId: string, statusId: string): void {
+    if (targetId === authorId) return;
+    const id = this.nextId();
+    this.notifications.push({
+      id,
+      type: "mention",
+      accountId: authorId,
+      recipientId: targetId,
+      statusId,
+      createdAt: new Date().toISOString(),
+      groupKey: `ungrouped-${id}`,
+    });
+  }
+
   clearNotifications(): void {
     this.notifications.length = 0;
   }
 
   private seq = 1000;
   readonly domain: string;
+  /** The local bot, used as the default recipient for seeded notifications. */
+  readonly botAcct: string;
 
   constructor(opts: { botAcct: string; hostAcct: string; playerAcct: string }) {
     this.domain = splitAcct(opts.botAcct).domain ?? "mock.local";
+    this.botAcct = opts.botAcct;
     this.addAccount(opts.botAcct);
     this.addAccount(opts.hostAcct);
     this.addAccount(opts.playerAcct);
