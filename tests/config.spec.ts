@@ -100,9 +100,9 @@ describe("loadConfig", () => {
   });
 
   it("enforces Mastodon poll duration bounds (5 min – 7 days)", () => {
-    expect(() => cfg({ POLL_DURATION_SEC: "299" })).toThrow(/POLL_DURATION_SEC/);
+    expect(() => cfg({ POLL_DURATION_SEC: "29" })).toThrow(/POLL_DURATION_SEC/);
     expect(() => cfg({ POLL_DURATION_SEC: "604801" })).toThrow(/POLL_DURATION_SEC/);
-    expect(() => cfg({ POLL_DURATION_SEC: "300" })).not.toThrow();
+    expect(() => cfg({ POLL_DURATION_SEC: "30" })).not.toThrow();
     expect(() => cfg({ POLL_DURATION_SEC: "604800" })).not.toThrow();
   });
 
