@@ -174,7 +174,9 @@ class World {
     const sts = await this.player.getAccountStatusesByHandle(this.botHandle, 40);
     return sts
       .filter((s) => s.created_at > this.since)
-      .filter((s) => !this.gameTheme || s.text.includes(this.gameTheme))
+      // Scope to this run's game, but never let the filter hide a poll or a
+      // round result: those are the things later steps actually wait for.
+      .filter((s) => !this.gameTheme || s.hasPoll || s.text.includes(this.gameTheme))
       .map((s) => ({
         id: s.id,
         at: s.created_at,
@@ -192,7 +194,7 @@ class World {
     const out: Seen[] = [];
     for (const c of convs) {
       const s = c.last_status;
-      if (!s) continue;
+      if (!s?.account) continue;
       if (s.created_at <= this.since) continue;
       if (!acctMatches(s.account.acct, viewer, this.botHandle)) continue;
       out.push({
@@ -213,8 +215,10 @@ class World {
       const pub = await this.botActivity();
       const dm = await this.playerDmActivity();
       const bits: string[] = [`public=${pub.length}`, `dm=${dm.length}`];
+      // Both lists can legitimately be empty: the theme filter scopes
+      // observations to this run's game, and nothing is posted under it yet.
       const newest = pub[0] ?? dm[0];
-      if (newest) bits.push(`newest="${newest.text.slice(0, 50)}"`);
+      bits.push(newest ? `newest="${newest.text.slice(0, 50)}"` : "newest=none");
       return bits.join(" ");
     } catch (e) {
       return `unreadable: ${String(e).slice(0, 60)}`;
