@@ -18,6 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { driverExitCode } from "./driver-exit.js";
+import { resolveBaseUrl } from "./mastodon-helpers.js";
 import { openGames } from "../../src/game/types.js";
 import {
   MastodonAPI,
@@ -30,6 +31,10 @@ import {
 
 interface Cfg {
   hostInstance: string;
+  /** Resolved API origins. Explicit *_API_URL wins; else https://<instance>. */
+  hostApiUrl: string;
+  botApiUrl: string;
+  player1ApiUrl: string;
   hostToken: string;
   hostAcct: string;
   botAcct: string;
@@ -131,6 +136,14 @@ function loadConfig(): Cfg {
 
   return {
     hostInstance: vals.HOST_INSTANCE || "mastodon.social",
+    // Optional explicit origins. A bare host still resolves to https://<host>,
+    // so the live runs take the same path as the mock ones.
+    hostApiUrl: resolveBaseUrl(vals.HOST_API_URL, vals.HOST_INSTANCE || "mastodon.social"),
+    botApiUrl: resolveBaseUrl(vals.BOT_API_URL, vals.BOT_INSTANCE || "mastodon.social"),
+    player1ApiUrl: resolveBaseUrl(
+      vals.PLAYER1_API_URL,
+      vals.PLAYER1_INSTANCE || "ursal.zone",
+    ),
     hostToken: vals.HOST_TOKEN || "",
     hostAcct: vals.HOST_ACCT || "",
     botAcct: vals.BOT_ACCT || "mauriciobc",
@@ -374,9 +387,9 @@ async function step(name: string, fn: () => Promise<string>, world: World) {
 
 async function main() {
   const cfg = loadConfig();
-  const host = new MastodonAPI(`https://${cfg.hostInstance}`, cfg.hostToken, cfg.debug);
+  const host = new MastodonAPI(cfg.hostApiUrl, cfg.hostToken, cfg.debug);
   const player = new MastodonAPI(
-    `https://${cfg.player1Instance}`,
+    cfg.player1ApiUrl,
     cfg.player1Token,
     cfg.debug,
   );

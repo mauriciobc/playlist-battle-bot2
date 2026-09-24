@@ -69,11 +69,57 @@ export function readLogSettings(env: NodeJS.ProcessEnv = process.env): {
   };
 }
 
+/** Loopback literals only - not 127.0.0.1.evil.com, not a LAN address. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname.toLowerCase().replace(/^\[|\]$/g, ""));
+}
+
+/**
+ * The transport rule, applied after the schema parses so it can see RUN_MODE.
+ *
+ * https is always fine. Cleartext http is fine only for a loopback literal
+ * and only outside production - the mock Mastodon the e2e harness runs
+ * against is the one case that needs it. A LAN address or a public host over
+ * http still fails, which is the whole point of the original rule.
+ */
+export function assertMastodonTransport(
+  url: string,
+  mode: string | undefined,
+): void {
+  if (url.startsWith("https://")) return;
+  const cleartextOk =
+    !url.startsWith("http://") ||
+    (mode !== "production" && isLoopbackHost(safeHostname(url)));
+  if (!cleartextOk) {
+    throw new Error(
+      "Invalid configuration: MASTODON_URL: must be an https URL (cleartext " +
+        "http is allowed only for a loopback host, and never in production)",
+    );
+  }
+}
+
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
 const envSchema = z.object({
-  MASTODON_URL: z
-    .string()
-    .url()
-    .startsWith("https://", "must be an https URL"),
+  /**
+   * https, always - except a cleartext loopback URL outside production.
+   *
+   * The bearer token must not cross a network in clear text, which is why
+   * this has been https-only. The mock Mastodon used by the e2e harness
+   * listens on 127.0.0.1, so that one case needs http. The exception is
+   * deliberately narrow: the host must be a loopback literal, and production
+   * is excluded, so a non-loopback http URL - a LAN address, a public host -
+   * still fails in every mode.
+   */
+  MASTODON_URL: z.string().url(),
   MASTODON_TOKEN: z.string().min(1, "required"),
   BOT_ACCT: z
     .string()
@@ -211,6 +257,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   // TEST_MODE=1 with no RUN_MODE means "test", which preserves the old
   // zeroed-threshold behaviour exactly.
   const runMode: RunMode = e.RUN_MODE ?? (e.TEST_MODE ? "test" : "production");
+
+  // Cross-field check, deliberately AFTER runMode is resolved: an unset
+  // RUN_MODE means production, and reading the raw value would let cleartext
+  // loopback through by default.
+  assertMastodonTransport(e.MASTODON_URL, runMode);
   const isTestLike = runMode === "test";
   const isE2e = runMode === "e2e";
 

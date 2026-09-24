@@ -62,6 +62,25 @@ export interface MastodonNotification {
   status?: MastodonStatus;
 }
 
+/**
+ * Resolve the API origin for a role.
+ *
+ * The driver used to build `https://${hostInstance}` unconditionally, so
+ * aiming it at the mock Mastodon would have sent it to https://mock.social -
+ * a real DNS lookup rather than the mock listening on 127.0.0.1. An explicit
+ * override wins when given; a bare host still gets https, so the live runs
+ * use the same code path as the mock runs.
+ */
+export function resolveBaseUrl(
+  override: string | undefined,
+  host: string | undefined,
+): string {
+  const fallback = (host ?? "").trim() || "mastodon.social";
+  const explicit = (override ?? "").trim();
+  if (explicit.length > 0) return explicit.replace(/\/+$/, "");
+  return `https://${fallback}`;
+}
+
 class MastodonAPI {
   private baseUrl: string;
   private token: string;
