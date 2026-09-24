@@ -123,6 +123,13 @@ class MastodonAPI {
     return this.request("GET", `/statuses/${id}`);
   }
 
+  /** Get the reply/thread tree around a status. */
+  async getStatusContext(
+    id: string,
+  ): Promise<{ ancestors: MastodonStatus[]; descendants: MastodonStatus[] }> {
+    return this.request("GET", `/statuses/${id}/context`);
+  }
+
   /** Vote on a poll. optionIndices is 0-based. */
   async votePoll(statusId: string, pollId: string, choices: number[]): Promise<MastodonPoll> {
     return this.request("POST", `/polls/${pollId}/vote`, { choices });
@@ -240,15 +247,36 @@ export async function waitForBotReply(
   debug = false,
 ): Promise<MastodonStatus | null> {
   const deadline = Date.now() + timeoutSec * 1000;
+  const norm = (s: string) => s.replace(/^@/, "").toLowerCase();
 
   while (Date.now() < deadline) {
+    // 1) Direct mention notification (works when the bot replies inline).
     const notifs = await api.getNotifications(10);
     for (const n of notifs) {
-      if (n.type === "mention" && n.account.acct === botAcct && n.status?.in_reply_to_id === inReplyToId) {
-        if (debug) console.log(`  ✓ Bot replied to status ${inReplyToId}`);
+      if (n.type === "mention" && norm(n.account.acct) === norm(botAcct) && n.status?.in_reply_to_id === inReplyToId) {
+        if (debug) console.log(`  ✓ Bot replied to status ${inReplyToId} (notification)`);
         return n.status;
       }
     }
+
+    // 2) Thread context: the bot opens a NEW thread rooted at its own status,
+    //    so the host gets no mention notification for it. Poll the context of
+    //    the status the host posted and accept the bot's thread root.
+    try {
+      const ctx = await api.getStatusContext(inReplyToId);
+      // The bot's creation status is a thread ROOT, so it is an ancestor of
+      // the host's post. Check both directions to be safe.
+      const nearby = [...ctx.descendants, ...ctx.ancestors];
+      for (const s of nearby) {
+        if (norm(s.account.acct) === norm(botAcct)) {
+          if (debug) console.log(`  ✓ Bot status ${s.id} found via context`);
+          return s;
+        }
+      }
+    } catch {
+      // context unavailable (deleted/private) — keep polling
+    }
+
     await sleep(3000);
   }
   if (debug) console.log(`  ✗ Timed out waiting for bot reply to ${inReplyToId}`);
