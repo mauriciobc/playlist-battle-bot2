@@ -18,6 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { driverExitCode } from "./driver-exit.js";
+import { alreadyVotedOn, castPlan, shouldStopVoting } from "./vote-planner.js";
 import { resolveBaseUrl } from "./mastodon-helpers.js";
 import { openGames } from "../../src/game/types.js";
 import { isRefusal, isRefusalText, looksLikeAcceptance } from "./driver-replies.js";
@@ -165,12 +166,17 @@ function loadConfig(): Cfg {
     tuneUrlsHost: hostUrls,
     tuneUrlsPlayer1: playerUrls,
     debug: vals.DEBUG === "1" || vals.DEBUG === "true",
+    // Deadlines, not waits. A round measured ~140s against the 300s poll and
+    // the 120s early close, so 8 rounds need ~1120s; the finale backstop is
+    // doubled from 900 to 2400s to cover that with headroom, and the poll
+    // backstop from 420 to 900s. The run that timed out was cut at 560s in
+    // round 4 of 8 by the runner, not by any of these.
     backstop: {
       create: n("BACKSTOP_CREATE_SEC", 120),
       accept: n("BACKSTOP_ACCEPT_SEC", 180),
       submit: n("BACKSTOP_SUBMIT_SEC", 300),
-      poll: n("BACKSTOP_POLL_SEC", n("POLL_DURATION_SEC", 300) + 120),
-      finale: n("BACKSTOP_FINALE_SEC", 900),
+      poll: n("BACKSTOP_POLL_SEC", 900),
+      finale: n("BACKSTOP_FINALE_SEC", 2400),
     },
     pollIntervalMs: n("POLL_INTERVAL_MS", 4000),
   };
@@ -523,58 +529,113 @@ async function main() {
     return `${total} submitted, 0 rejected, first round ${poll.id}`;
   }, world);
 
-  // ── 4/5. Vote ────────────────────────────────────────────────────────
+  // ── 4/5. Vote, every round ───────────────────────────────────────────
+  //
+  // This was a single step OUTSIDE any loop, so the two casts ran once, in
+  // round 1, and rounds 2..N resolved with nobody voting:
+  //
+  //   #1  1002:0  1003:2   <- both sides voted
+  //   #2  1002:0  1003:0   <- nobody
+  //   #3  1002:0  1003:0
+  //
+  // The bot read each tally correctly and called them ties, which is right
+  // for a round nobody voted in. The harness was the thing under-testing.
+  //
+  // Two things this loop must get right, both now unit-tested in
+  // vote-planner.ts:
+  //   - one vote per poll id, or the same poll is re-voted on every pass and
+  //     the tally inflates
+  //   - stop on a signal (the bot's own finale announcement, or the declared
+  //     length played out), not on a fixed count
   await step("vote", async () => {
-    // If every poll has already resolved, the duel ran without us voting -
-    // that is a real outcome, not a harness failure. Report it and move on.
-    const all = await world.botActivity();
-    const pollStatus = all.find((s) => s.hasPoll);
-    if (!pollStatus?.poll) {
-      const decided = all.find((s) =>
-        /rodada\s*\d+\s*:\s*(W\.O\.|empate|@)/i.test(s.text),
-      );
-      if (decided) {
-        say("  all rounds already resolved before the driver could vote");
-        return `rounds resolved without a driver vote: ${decided.text.slice(0, 70)}`;
-      }
-      throw new Error("no poll and no resolved round to observe");
-    }
-    const poll = pollStatus.poll;
-
-    say(`  poll ${poll.id}: ${poll.options.map((o) => o.title).join(" vs ")}`);
-
-    // Both participants vote the SAME option, so the round has a winner.
-    //
-    // The previous version had the host pick option 0 and the challenger
-    // option 1 - a guaranteed 1-1 tie, which is why every round resolved as
-    // "EMPATE". The comment claimed the opposite of what the code did.
-    const votes: string[] = [];
-    const cast = async (api: MastodonAPI, label: string, choice: number) => {
-      const r = await api.votePoll(pollStatus.id, poll.id, [choice]);
-      votes.push(`${label}=${r.voted !== false}`);
-      say(`  ${label} voted option ${choice} (voters=${r.voters_count})`);
-    };
-
-    const n = poll.options.length;
-    const pick = 0; // both sides back the first tune
-    await cast(host, "host", pick);
-    if (n > 1) await cast(player, "challenger", pick);
-
-    // Confirm the vote actually landed: the poll must now report a voter.
-    // "a poll is still readable" is true whether or not the POST worked.
-    await until(
-      async () => {
-        const fresh = await world.botActivity();
-        const p = fresh.find((s) => s.hasPoll)?.poll;
-        return p && (p.voters_count ?? 0) > 0 ? p : undefined;
-      },
-      `poll tallied ${2} votes`,
-      cfg.backstop.poll,
-      world,
+    const castOn = new Map(
+      (Object.entries({ host, challenger: player }) as Array<[string, MastodonAPI]>).map(
+        ([label, api]) => [label, api],
+      ),
     );
+    const votedPolls = new Set<string>();
+    const tally: string[] = [];
+    let round = 1;
 
-    return `${votes.join(" ")} on ${poll.options.length} options`;
+    for (;;) {
+      const pub = await world.botActivity();
+
+      // A finale ends the voting whether or not every round was reached.
+      const finale = pub.find((s) =>
+        /final|encerrad|vencedor|terminou|acabou|🏆|parabéns|parabens/i.test(s.text),
+      );
+      const open = pub.find((s) => s.hasPoll && s.poll && !s.poll.expired);
+      const roundNo = roundsSeen(pub);
+
+      if (!shouldStopVoting({ hasFinale: !!finale, roundNumber: roundNo || round, playlistLength: cfg.playlistLength })) {
+        if (finale) {
+          say(`  finale announced after ${round - 1} voted round(s)`);
+        } else {
+          say(`  ${cfg.playlistLength} rounds played out`);
+        }
+        break;
+      }
+
+      // Nothing to vote on yet: the bot is still collecting, or the poll has
+      // expired and the next round has not opened.
+      if (!open?.poll) {
+        await new Promise((r) => setTimeout(r, world.cfg.pollIntervalMs));
+        continue;
+      }
+
+      const pollId = String(open.poll.id);
+      if (alreadyVotedOn(votedPolls, pollId)) {
+        // Same poll, already counted. Wait for the next one rather than
+        // re-voting: a second cast on the same poll is a wrong tally.
+        await new Promise((r) => setTimeout(r, world.cfg.pollIntervalMs));
+        continue;
+      }
+
+      say(`  round ${round}: poll ${pollId} — ${open.poll.options.map((o) => o.title).join(" vs ")}`);
+      const casts = castPlan(open.poll.options.length, 0);
+      for (const { label, choice } of casts) {
+        const api = castOn.get(label)!;
+        const r = await api.votePoll(open.id, pollId, [choice]);
+        tally.push(`${label}=${choice}:${r.voters_count ?? "?"}`);
+      }
+      votedPolls.add(pollId);
+      round += 1;
+
+      // Confirm the vote landed: a poll that still reads as readable proves
+      // nothing, a poll that reports a voter proves the POST took.
+      await until(
+        async () => {
+          const fresh = await world.botActivity();
+          const p = fresh.find((s) => s.hasPoll)?.poll;
+          return p && String(p.id) === pollId && (p.voters_count ?? 0) > 0 ? p : undefined;
+        },
+        `poll ${pollId} tallied`,
+        cfg.backstop.poll,
+        world,
+      );
+      say(`  round ${round - 1} voted: ${casts.map((c) => c.label).join(" + ")}`);
+    }
+
+    if (tally.length === 0) {
+      throw new Error("no poll was ever open to vote on");
+    }
+    return `${votedPolls.size} round(s) voted: ${tally.join(" ")}`;
   }, world);
+
+  /**
+   * The highest round number the bot has announced, or 0 if none yet.
+   * "Round 3! Vote for the best tune" -> 3.
+   */
+  function roundsSeen(pub: Awaited<ReturnType<World["botActivity"]>>): number {
+    let high = 0;
+    for (const s of pub) {
+      for (const m of s.text.matchAll(/(?:round|rodada)\s*#?(\d+)/gi)) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n > high) high = n;
+      }
+    }
+    return high;
+  }
 
   // ── 6. Finale ────────────────────────────────────────────────────────
   await step("finale", async () => {
