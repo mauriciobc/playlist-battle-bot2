@@ -97,7 +97,10 @@ function loadConfig(): Cfg {
     player1Instance: vals.PLAYER1_INSTANCE || "ursal.zone",
     player1Token: vals.PLAYER1_TOKEN || vals.PLAYER_TOKEN || "",
     player1Acct: vals.PLAYER1_ACCT || "",
-    theme: vals.THEME || "E2E Theme",
+    // Unique per run: the theme is how the driver recognises its own game
+    // among everything else the bot announces. A fixed name collides with
+    // games left over from earlier runs.
+    theme: `${vals.GAME_THEME || vals.THEME || "E2E"} r${Date.now().toString(36)}`,
     playlistLength: n("PLAYLIST_LENGTH", 8),
     pollDurationSec: n("POLL_DURATION_SEC", 300),
     tuneUrlsHost: urls("TUNE_URLS_HOST"),
