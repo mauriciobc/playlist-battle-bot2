@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { PlaylistPrivacy } from "./youtube/ytmusic.js";
 
 /** Mastodon allows polls from 5 minutes to 7 days. */
-const POLL_MIN_SEC = 30;
+const POLL_MIN_SEC = 300;
 const POLL_MAX_SEC = 604800;
 
 const intFromEnv = (min: number, max?: number) =>

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig, readLogSettings, type BotConfig } from "../src/config.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openDatabase, migrate } from "../src/db/index.js";
 
 const validEnv: NodeJS.ProcessEnv = {
   MASTODON_URL: "https://mastodon.example",
@@ -100,10 +104,38 @@ describe("loadConfig", () => {
   });
 
   it("enforces Mastodon poll duration bounds (5 min – 7 days)", () => {
-    expect(() => cfg({ POLL_DURATION_SEC: "29" })).toThrow(/POLL_DURATION_SEC/);
+    expect(() => cfg({ POLL_DURATION_SEC: "299" })).toThrow(/POLL_DURATION_SEC/);
     expect(() => cfg({ POLL_DURATION_SEC: "604801" })).toThrow(/POLL_DURATION_SEC/);
-    expect(() => cfg({ POLL_DURATION_SEC: "30" })).not.toThrow();
+    expect(() => cfg({ POLL_DURATION_SEC: "300" })).not.toThrow();
     expect(() => cfg({ POLL_DURATION_SEC: "604800" })).not.toThrow();
+  });
+
+  it("keeps the DB poll_duration_sec constraint in sync with the config minimum", () => {
+    // Mastodon rejects polls shorter than 5 minutes, so both the config layer
+    // and the SQLite CHECK must agree on 300. If either drifts, game creation
+    // fails at runtime with an opaque "CHECK constraint failed" error.
+    const dir = mkdtempSync(join(tmpdir(), "pb-poll-floor-"));
+    try {
+      const db = openDatabase(join(dir, "test.db"));
+      migrate(db);
+      const floor = cfg({ POLL_DURATION_SEC: "300" });
+      const insert = db.prepare(
+        `INSERT INTO games
+           (id, status, theme, playlist_length, host_account_id, poll_duration_sec, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      expect(() => insert.run(
+        "g-ok", "CREATED", "theme", 8, "host", floor.pollDurationSec,
+        "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+      )).not.toThrow();
+      expect(() => insert.run(
+        "g-bad", "CREATED", "theme", 8, "host", floor.pollDurationSec - 1,
+        "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+      )).toThrow(/CHECK constraint failed/);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("enforces positive acceptance and submission windows", () => {
