@@ -1,0 +1,225 @@
+{
+  "_comment": "Real messages from failed E2E runs. acct_reported/as seen by the given viewer. See tests/mastodon-dm-detection.spec.ts.",
+  "bot_acks_to_host_same_instance": {
+    "description": "Bot acks the host. The host is on the bot's instance, so the bot is reported as a BARE acct ('mauriciobc'). Fetchable by GET /statuses/{id} but absent from /conversations and /notifications.",
+    "viewer_instance": "mastodon.social",
+    "messages": [
+      {
+        "id": "117323864314516716",
+        "created_at": "2026-09-24T03:21:37.579Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@mastodon.social",
+        "mentions": [
+          "saiugol"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "statuses/{id}"
+        ],
+        "hidden_from": [
+          "conversations",
+          "notifications"
+        ]
+      },
+      {
+        "id": "117323860026422889",
+        "created_at": "2026-09-24T03:20:32.144Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@mastodon.social",
+        "mentions": [
+          "saiugol"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "statuses/{id}"
+        ],
+        "hidden_from": [
+          "conversations",
+          "notifications"
+        ]
+      },
+      {
+        "id": "117323855762830664",
+        "created_at": "2026-09-24T03:19:27.087Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@mastodon.social",
+        "mentions": [
+          "saiugol"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "statuses/{id}"
+        ],
+        "hidden_from": [
+          "conversations",
+          "notifications"
+        ]
+      },
+      {
+        "id": "117323851512430445",
+        "created_at": "2026-09-24T03:18:22.231Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@mastodon.social",
+        "mentions": [
+          "saiugol"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "statuses/{id}"
+        ],
+        "hidden_from": [
+          "conversations",
+          "notifications"
+        ]
+      },
+      {
+        "id": "117323847242158382",
+        "created_at": "2026-09-24T03:17:17.073Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@mastodon.social",
+        "mentions": [
+          "saiugol"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "statuses/{id}"
+        ],
+        "hidden_from": [
+          "conversations",
+          "notifications"
+        ]
+      },
+      {
+        "id": "117323843324811490",
+        "created_at": "2026-09-24T03:16:17.299Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@mastodon.social",
+        "mentions": [
+          "saiugol"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "statuses/{id}"
+        ],
+        "hidden_from": [
+          "conversations",
+          "notifications"
+        ]
+      }
+    ]
+  },
+  "bot_acks_to_player_cross_instance": {
+    "description": "Bot acks the remote player. Player sees them in /conversations, but GET /statuses/{id} returns 404 for the cross-instance DM.",
+    "viewer_instance": "ursal.zone",
+    "messages": [
+      {
+        "id": "117323872143978812",
+        "created_at": "2026-09-24T03:23:37.045Z",
+        "acct_reported": "mauriciobc@mastodon.social",
+        "mentions": [
+          "mauriciobc@ursal.zone"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "conversations"
+        ],
+        "hidden_from": [
+          "statuses/{id}"
+        ]
+      },
+      {
+        "id": "117323871147223142",
+        "created_at": "2026-09-24T03:23:21.834Z",
+        "acct_reported": "mauriciobc@mastodon.social",
+        "mentions": [
+          "mauriciobc@ursal.zone"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "conversations"
+        ],
+        "hidden_from": [
+          "statuses/{id}"
+        ]
+      },
+      {
+        "id": "117323870485380531",
+        "created_at": "2026-09-24T03:23:11.736Z",
+        "acct_reported": "mauriciobc@mastodon.social",
+        "mentions": [
+          "mauriciobc@ursal.zone"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "conversations"
+        ],
+        "hidden_from": [
+          "statuses/{id}"
+        ]
+      },
+      {
+        "id": "117323869821293225",
+        "created_at": "2026-09-24T03:23:01.603Z",
+        "acct_reported": "mauriciobc@mastodon.social",
+        "mentions": [
+          "mauriciobc@ursal.zone"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "conversations"
+        ],
+        "hidden_from": [
+          "statuses/{id}"
+        ]
+      },
+      {
+        "id": "117323869527188601",
+        "created_at": "2026-09-24T03:22:57.114Z",
+        "acct_reported": "mauriciobc@mastodon.social",
+        "mentions": [
+          "mauriciobc@ursal.zone"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "conversations"
+        ],
+        "hidden_from": [
+          "statuses/{id}"
+        ]
+      },
+      {
+        "id": "117323868843767263",
+        "created_at": "2026-09-24T03:22:46.685Z",
+        "acct_reported": "mauriciobc@mastodon.social",
+        "mentions": [
+          "mauriciobc@ursal.zone"
+        ],
+        "in_reply_to_id": null,
+        "visible_via": [
+          "conversations"
+        ],
+        "hidden_from": [
+          "statuses/{id}"
+        ]
+      }
+    ]
+  },
+  "player_own_submissions": {
+    "description": "The player's OWN outgoing submission. On the player's instance the account is local, so acct is reported BARE - identical local part to the bot's handle. Any handle comparison that ignores the instance mistakes these for bot replies.",
+    "viewer_instance": "ursal.zone",
+    "messages": [
+      {
+        "id": "117323834778384628",
+        "created_at": "2026-09-24T03:14:06.898Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@ursal.zone"
+      },
+      {
+        "id": "117323859877641020",
+        "created_at": "2026-09-24T03:20:29.873Z",
+        "acct_reported": "mauriciobc",
+        "acct_qualified": "mauriciobc@ursal.zone"
+      }
+    ]
+  }
+}
