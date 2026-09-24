@@ -28,6 +28,30 @@ function extractMentions(text: string): string[] {
   return out;
 }
 
+/**
+ * Handles in the challenger list, with or without a leading "@".
+ *
+ * Accepts "user", "user@instance" and "@user@instance". The mention-only
+ * pattern dropped the local part of an unprefixed qualified handle, because
+ * "@" appears inside "user@instance" and the capture began there.
+ */
+function extractChallengers(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  // Match an optional @, then user, then an optional @host group.
+  for (const m of text.matchAll(
+    /(^|\s)@?([A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?)/g,
+  )) {
+    const handle = m[2];
+    if (!handle) continue;
+    const key = handle.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(handle);
+  }
+  return out;
+}
+
 /** Local part of a handle (`alice` for `alice@other.social`). */
 function localPart(handle: string): string {
   return handle.split("@")[0]!;
@@ -87,7 +111,7 @@ export function parseCreateCommand(text: string, botAcct: string, instanceDomain
   const botFull = instanceDomain
     ? botAcct.toLowerCase() + "@" + instanceDomain.toLowerCase()
     : botAcct.toLowerCase();
-  const challengers = extractMentions(afterLen).filter(
+  const challengers = extractChallengers(afterLen).filter(
     (c) => {
       const mentionLower = c.toLowerCase();
       // Filter the bot itself: bare @bot and @bot@bot's-instance
