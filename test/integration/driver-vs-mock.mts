@@ -54,9 +54,16 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
-  const [baseUrl, token] = readFileSync(endpointFile, "utf-8").split("\n");
+  const endpoint: Record<string, string> = {};
+  for (const line of readFileSync(endpointFile, "utf-8").split("\n")) {
+    const t = line.trim();
+    if (!t || !t.includes("=")) continue;
+    const i = t.indexOf("=");
+    endpoint[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+  const baseUrl = endpoint.MOCK_URL;
   if (!baseUrl) {
-    console.error(".mock-endpoint is empty");
+    console.error(".mock-endpoint carries no MOCK_URL");
     process.exit(2);
   }
   console.log(`driver -> ${baseUrl}`);
@@ -86,8 +93,11 @@ async function main(): Promise<void> {
   vals.HOST_ACCT = "host";
   vals.BOT_ACCT = "bot";
   vals.PLAYER1_ACCT = "player";
-  vals.HOST_TOKEN = token ?? "mock-token";
-  vals.PLAYER1_TOKEN = vals.HOST_TOKEN;
+  // A token per role. Sharing one made player.getMe() return the bot, so the
+  // host and the challenger resolved to the same account and the bot
+  // refused the game as a duplicate player.
+  vals.HOST_TOKEN = endpoint.MOCK_HOST_TOKEN ?? "host-token";
+  vals.PLAYER1_TOKEN = endpoint.MOCK_PLAYER_TOKEN ?? "player-token";
 
   const half = Math.floor(TUNES.length / 2);
   vals.TUNE_URLS_HOST = TUNES.slice(0, half).join(",");

@@ -275,7 +275,16 @@ export class MockState {
       application: { name: "mock", website: null },
       account: this.serializeAccount(account),
       media_attachments: [],
-      mentions: [],
+      // MentionSerializer: id, username, url, acct. Not a count - the bot's
+      // classifyNotification reads this array to decide whether a status is
+      // addressed to it, so an empty list makes it ignore the newgame while
+      // still advancing the cursor.
+      mentions: this.mentionsOf(status).map((account) => ({
+        id: account.id,
+        username: account.username,
+        url: `https://${account.domain ?? this.domain}/@${account.username}`,
+        acct: account.acct,
+      })),
       tags: [],
       emojis: [],
       card: null,

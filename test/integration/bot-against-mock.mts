@@ -30,10 +30,24 @@ const server = new MockMastodonServer({
   // Bind all interfaces: a Dockerised bot cannot reach the host's 127.0.0.1.
   host: "0.0.0.0",
 });
+// A token per account. Sharing the bot's token across roles makes
+// player.getMe() return the bot, and the driver then posts a newgame whose
+// host and challenger are the same account - refused as a duplicate.
+server.registerToken("host-token", "host@mock.social");
+server.registerToken("player-token", "player@mock.social");
 await server.start();
 
 const url = server.baseUrl;
-writeFileSync(resolve(HERE, ".mock-endpoint"), `${url}\n${server.token}\n`);
+writeFileSync(
+  resolve(HERE, ".mock-endpoint"),
+  [
+    `MOCK_URL=${url}`,
+    `MOCK_BOT_TOKEN=${server.token}`,
+    `MOCK_HOST_TOKEN=host-token`,
+    `MOCK_PLAYER_TOKEN=player-token`,
+    "",
+  ].join("\n"),
+);
 console.log(`mock Mastodon listening on ${url}`);
 console.log("run the driver with: npx tsx test/integration/driver-vs-mock.mts\n");
 
