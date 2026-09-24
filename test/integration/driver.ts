@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { driverExitCode } from "./driver-exit.js";
 import {
   MastodonAPI,
   acctMatches,
@@ -598,14 +599,30 @@ function report() {
   }
   const ok = results.filter((r) => r.ok).length;
   const bad = results.length - ok;
+  if (fatal) {
+    const why = fatal instanceof Backstop ? `backstop: ${fatal.message}` : String(fatal);
+    console.log(`  ❌ aborted    ${why.split("\n")[0]?.slice(0, 60) ?? ""}`);
+  }
   console.log("─".repeat(64));
   console.log(`  ${ok} passed, ${bad} failed, total ${((Date.now() - t0) / 1000).toFixed(0)}s`);
   console.log("═".repeat(64));
-  process.exit(bad > 0 ? 1 : 0);
+  // A run that threw is a failure even when no step recorded one. Exiting 0
+  // on an empty result list is how a config error looked like a green run.
+  process.exit(bad > 0 || fatal ? 1 : 0);
 }
+
+/**
+ * A run that threw before completing its steps is a failure, even if no
+ * step recorded one. LoadConfig throws on a configuration problem - the
+ * overlap guard in particular - and that used to exit 0 with an empty
+ * result list. Green has to mean the lifecycle ran, not merely that nothing
+ * was counted.
+ */
+let fatal: unknown = null;
 
 main()
   .catch((e) => {
+    fatal = e;
     if (!(e instanceof Backstop)) console.error("fatal:", e);
   })
-  .finally(report);
+  .finally(() => report());
