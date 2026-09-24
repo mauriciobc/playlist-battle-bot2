@@ -26,6 +26,12 @@ export type MockMastodonOptions = {
   /** Any string; the mock treats it as the bot's bearer token. */
   token?: string;
   port?: number;
+  /**
+   * Bind address. Defaults to 127.0.0.1 so a stray run is not reachable from
+   * the LAN. Pass "0.0.0.0" when the bot runs in Docker, where 127.0.0.1 is
+   * the container's own loopback and cannot reach a process on the host.
+   */
+  host?: string;
 };
 
 type Json = Record<string, unknown>;
@@ -34,12 +40,15 @@ export class MockMastodonServer {
   readonly state: MockState;
   readonly token: string;
   baseUrl = "";
-  private port = 0;
+  /** The port actually bound, so callers can advertise a reachable origin. */
+  port = 0;
+  private readonly bindHost: string;
   private server: ReturnType<typeof createServer> | null = null;
 
   constructor(opts: MockMastodonOptions) {
     this.token = opts.token ?? "mock-token";
     this.port = opts.port ?? 0;
+    this.bindHost = opts.host ?? "127.0.0.1";
     this.state = new MockState({
       botAcct: opts.botAcct,
       hostAcct: opts.hostAcct,
@@ -55,10 +64,13 @@ export class MockMastodonServer {
     this.server = server;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(this.port, "127.0.0.1", () => resolve());
+      server.listen(this.port, this.bindHost, () => resolve());
     });
     const address = server.address();
     this.port = typeof address === "object" && address ? address.port : this.port;
+    // Always report the loopback origin. When bound to 0.0.0.0 the socket
+    // also answers there, and a caller needing a container-reachable address
+    // can build one from `port` plus its own host.
     this.baseUrl = `http://127.0.0.1:${this.port}`;
   }
 
@@ -116,6 +128,50 @@ export class MockMastodonServer {
         return json(res, 200, this.state.serializeAccount(found));
       }
 
+      // GET /api/v1/accounts/:id/statuses
+      const acctStatuses = p.match(/^\/api\/v1\/accounts\/([^/]+)\/statuses$/);
+      const acctId = acctStatuses?.[1];
+      if (method === "GET" && acctId !== undefined) {
+        if (!this.state.accounts.has(acctId)) {
+          return json(res, 404, { error: "Record not found" });
+        }
+        const limit = Number(path.searchParams.get("limit") ?? 40) || 40;
+        return json(res, 200, this.state.accountStatuses(acctId, viewer, limit));
+      }
+
+      // GET /api/v1/conversations
+      if (method === "GET" && p === "/api/v1/conversations") {
+        const limit = Number(path.searchParams.get("limit") ?? 40) || 40;
+        const maxId = path.searchParams.get("max_id");
+        const sinceId = path.searchParams.get("since_id");
+        const all = this.state.conversationPage(viewer, { limit, maxId, sinceId });
+        const total = this.state.conversations(viewer, sinceId).length;
+        // conversations_spec expects BOTH rel="next" and rel="prev" when the
+        // list is limited. Api::Pagination#set_pagination_headers writes one
+        // Link entry per side, and the bot follows next.
+        if (all.length < total || maxId !== null) {
+          const oldest = all[all.length - 1]?.id;
+          const newest = all[0]?.id;
+          const links: string[] = [];
+          const base = `${this.baseUrl}/api/v1/conversations`;
+          if (oldest !== undefined) {
+            links.push(`<${base}?limit=${limit}&min_id=${oldest}>; rel="next"`);
+            links.push(`<${base}?limit=${limit}&max_id=${oldest}>; rel="prev"`);
+          }
+          if (newest !== undefined) {
+            links.push(`<${base}?limit=${limit}&min_id=${newest}>; rel="prev"`);
+          }
+          res.setHeader("Link", links.join(", "));
+        }
+        return json(res, 200, all);
+      }
+
+      // POST /api/v1/notifications/clear
+      if (method === "POST" && p === "/api/v1/notifications/clear") {
+        this.state.clearNotifications();
+        return json(res, 200, {});
+      }
+
       // GET /api/v1/notifications
       if (method === "GET" && p === "/api/v1/notifications") {
         return this.notifications(res, path, viewer);
@@ -142,6 +198,15 @@ export class MockMastodonServer {
           if (!serialized) return json(res, 404, { error: "Record not found" });
           return json(res, 200, serialized);
         }
+      }
+
+      // GET /api/v1/statuses/:id/context
+      const contextMatch = p.match(/^\/api\/v1\/statuses\/([^/]+)\/context$/);
+      const contextId = contextMatch?.[1];
+      if (method === "GET" && contextId !== undefined) {
+        const target = this.state.statuses.get(contextId);
+        if (!target) return json(res, 404, { error: "Record not found" });
+        return json(res, 200, this.state.serializeContext(contextId, viewer));
       }
 
       // POST /api/v1/polls/:id/votes
@@ -218,6 +283,11 @@ export class MockMastodonServer {
       if (problem) return json(res, 422, { error: problem });
     }
 
+    const visibility =
+      input.visibility === "direct" || input.visibility === "private"
+        ? "direct"
+        : "public";
+
     const status: MockStatus = {
       id: this.state.nextId(),
       accountId: viewer.id,
@@ -225,8 +295,22 @@ export class MockMastodonServer {
       inReplyToId,
       createdAt: new Date().toISOString(),
       pollId: null,
+      visibility,
     };
     this.state.statuses.set(status.id, status);
+
+    // A direct status addressed to an acct forms the conversation's other
+    // participant. The bot's DM check looks for the conversation, not the
+    // visibility string, so the participant has to be real.
+    const addressed = Array.isArray(input.mentions)
+      ? (input.mentions as string[])
+      : typeof input.acct === "string"
+        ? [input.acct]
+        : [];
+    for (const raw of addressed) {
+      const target = this.state.lookup(raw.replace(/^@/, ""));
+      if (target) this.state.addMention(status.id, target.id);
+    }
 
     if (pollInput !== null && typeof pollInput === "object") {
       const raw = Array.isArray(pollInput.options) ? pollInput.options : [];
@@ -266,6 +350,9 @@ export class MockMastodonServer {
     if (this.state.pollExpired(poll)) {
       return json(res, 422, { error: "The poll has already ended" });
     }
+    // votes_spec posts `choices: %w(1)` - strings, not integers. Coerce
+    // before validating, or a spec-faithful request would 422 where Mastodon
+    // returns 200.
     const choices = input.choices.map((c) => Number(c));
     if (choices.some((c) => !Number.isInteger(c) || c < 0 || c >= poll.options.length)) {
       return json(res, 422, { error: "Invalid choice" });

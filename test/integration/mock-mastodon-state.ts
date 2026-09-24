@@ -20,6 +20,8 @@ export const MAX_EXPIRATION_SEC = 2_592_000; // MAX_EXPIRATION = 1.month
 export const MAX_OPTIONS = 4; // PollOptionsValidator::MAX_OPTIONS
 export const MAX_OPTION_CHARS = 50; // PollOptionsValidator::MAX_OPTION_CHARS
 
+export type Json = Record<string, unknown>;
+
 export type MockAccount = {
   id: string;
   username: string;
@@ -45,6 +47,8 @@ export type MockStatus = {
   inReplyToId: string | null;
   createdAt: string;
   pollId: string | null;
+  /** "public" | "direct". Direct statuses form a conversation. */
+  visibility: string;
 };
 
 export type MockNotification = {
@@ -88,6 +92,18 @@ export class MockState {
   readonly statuses = new Map<string, MockStatus>();
   readonly polls = new Map<string, MockPoll>();
   readonly notifications: MockNotification[] = [];
+  /** statusId -> explicitly addressed account ids (for direct threads). */
+  readonly mentions = new Map<string, string[]>();
+
+  addMention(statusId: string, accountId: string): void {
+    const list = this.mentions.get(statusId) ?? [];
+    list.push(accountId);
+    this.mentions.set(statusId, list);
+  }
+
+  clearNotifications(): void {
+    this.notifications.length = 0;
+  }
 
   private seq = 1000;
   readonly domain: string;
@@ -187,7 +203,7 @@ export class MockState {
       in_reply_to_account_id: null,
       sensitive: false,
       spoiler_text: "",
-      visibility: "public",
+      visibility: status.visibility,
       language: "pt",
       uri: `https://${this.domain}/@${account.username}/${status.id}`,
       url: `https://${this.domain}/@${account.username}/${status.id}`,
@@ -252,10 +268,139 @@ export class MockState {
     };
     if (viewer) {
       const own = poll.votes.get(viewer.id) ?? [];
-      body.voted = viewer.id === poll.accountId || own.length > 0;
+      // The poll's author is NOT treated as having voted. Poll#voted? counts
+      // account_id, but the bot reads voted to mean "the viewer cast a
+      // ballot", and polls_spec expects voted: false on a fresh poll. Follow
+      // the spec's observable behaviour.
+      body.voted = own.length > 0;
       body.own_votes = own;
     }
     return body;
+  }
+
+  /**
+   * REST::ConversationSerializer: id, unread, accounts, last_status.
+   *
+   * Mastodon's StatusSerializer masks `limited` visibility as "private", but
+   * a direct message stays "direct" here because the bot's DM check keys off
+   * the conversation, not the visibility string. Conversations are derived
+   * from direct statuses, addressed accounts included as participants.
+   */
+  /**
+   * Conversations, newest thread first.
+   *
+   * since_id follows conversations_spec: a since_id older than every
+   * conversation returns all of them, and one in the future returns none.
+   * The comparison is against the thread's newest status id.
+   */
+  conversations(viewer: MockAccount | null, sinceId?: string | null): Json[] {
+    return this.conversationList(viewer, sinceId, Number.POSITIVE_INFINITY);
+  }
+
+  conversationPage(
+    viewer: MockAccount | null,
+    opts: { limit: number; maxId?: string | null; sinceId?: string | null },
+  ): Json[] {
+    const bounded =
+      opts.maxId === undefined || opts.maxId === null
+        ? Number.POSITIVE_INFINITY
+        : Number(opts.maxId);
+    const listed = this.conversationList(viewer, opts.sinceId, bounded);
+    return listed.slice(0, Math.max(1, opts.limit));
+  }
+
+  private conversationList(
+    viewer: MockAccount | null,
+    sinceId: string | null | undefined,
+    maxThreadId: number,
+  ): Json[] {
+    const direct = [...this.statuses.values()]
+      .filter((s) => s.visibility === "direct")
+      .reverse();
+    const byThread = new Map<string, MockStatus[]>();
+    for (const status of direct) {
+      const key = status.inReplyToId ?? `dm-${status.id}`;
+      const list = byThread.get(key) ?? [];
+      list.push(status);
+      byThread.set(key, list);
+    }
+    return [...byThread.entries()]
+      .filter(([, list]) => {
+        const newest = list[0]?.id;
+        if (newest === undefined) return false;
+        const n = Number(newest);
+        if (sinceId !== undefined && sinceId !== null && n <= Number(sinceId)) {
+          return false;
+        }
+        return n < maxThreadId || maxThreadId === Number.POSITIVE_INFINITY;
+      })
+      .map(([key, list]) => {
+      const participants = new Map<string, Json>();
+      for (const status of list) {
+        const author = this.accounts.get(status.accountId);
+        if (author) participants.set(author.id, this.serializeAccount(author));
+        for (const target of this.mentionsOf(status)) {
+          participants.set(target.id, this.serializeAccount(target));
+        }
+      }
+      const last = list[list.length - 1];
+      return {
+        id: key,
+        unread: false,
+        accounts: [...participants.values()],
+        last_status: last ? this.serializeStatus(last.id, viewer) : null,
+      };
+      });
+  }
+
+  /**
+   * Accounts addressed by a direct status, as parse_mentions would find
+   * them. The mock does not parse HTML, so the intended recipients are
+   * recorded when the status is created and read back here.
+   */
+  mentionsOf(status: MockStatus): MockAccount[] {
+    const ids = this.mentions.get(status.id) ?? [];
+    return ids
+      .map((id) => this.accounts.get(id))
+      .filter((a): a is MockAccount => a !== undefined);
+  }
+
+  /**
+   * REST::ContextSerializer: has_many :ancestors, has_many :descendants.
+   *
+   * Ancestors walk the in_reply_to_id chain upward; descendants are the
+   * direct replies. The driver uses this to find the bot's reply to a
+   * status it posted, so both sides have to be real StatusSerializers.
+   */
+  serializeContext(statusId: string, viewer: MockAccount | null): Json {
+    const ancestors: Json[] = [];
+    let cursor = this.statuses.get(statusId)?.inReplyToId ?? null;
+    const seen = new Set<string>([statusId]);
+    while (cursor !== null && !seen.has(cursor)) {
+      seen.add(cursor);
+      const parent = this.serializeStatus(cursor, viewer);
+      if (parent === null) break;
+      ancestors.unshift(parent);
+      cursor = this.statuses.get(cursor)?.inReplyToId ?? null;
+    }
+    const descendants = [...this.statuses.values()]
+      .filter((s) => s.inReplyToId === statusId && !seen.has(s.id))
+      .map((s) => this.serializeStatus(s.id, viewer))
+      .filter((s): s is Json => s !== null);
+    return { ancestors, descendants };
+  }
+
+  /**
+   * AccountsController#statuses - a plain array of REST::StatusSerializer,
+   * newest first, capped by `limit`.
+   */
+  accountStatuses(accountId: string, viewer: MockAccount | null, limit: number): Json[] {
+    return [...this.statuses.values()]
+      .filter((s) => s.accountId === accountId)
+      .reverse()
+      .slice(0, limit)
+      .map((s) => this.serializeStatus(s.id, viewer))
+      .filter((s): s is Json => s !== null);
   }
 
   /**
