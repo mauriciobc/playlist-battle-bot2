@@ -29,8 +29,6 @@ interface TestState {
   botAcct: string;
   /** Fully-qualified bot handle, e.g. mauriciobc@mastodon.social. */
   botHandle: string;
-  /** Bot's numeric account ID - globally unique, unlike a handle. */
-  botAccountId: string;
   hostAcct: string;
   player1Acct: string;
   player2Acct: string | null;
@@ -91,10 +89,7 @@ async function init(cfg: TestConfig): Promise<TestState> {
     const p2Me = await player2Api.getMe();
     console.log(`  Player 2: @${p2Me.acct}`);
   }
-  // Resolve the bot's account ID. Handles are ambiguous across instances, so
-  // DM detection matches on this ID rather than on acct text.
-  const botAcctObj = await player1Api.lookupAccount(cfg.botHandle);
-  console.log(`  Bot: @${botAcctObj.acct} (id ${botAcctObj.id})`);
+  console.log(`  Bot: @${cfg.botAcct} on ${cfg.botInstance}`);
   console.log(`  Theme: "${cfg.theme}" (${cfg.playlistLength} tunes)`);
 
   return {
@@ -103,7 +98,6 @@ async function init(cfg: TestConfig): Promise<TestState> {
     player2Api,
     botAcct: cfg.botAcct,
     botHandle: `${cfg.botAcct}@${cfg.botInstance}`,
-    botAccountId: botAcctObj.id,
     hostAcct: cfg.hostAcct,
     player1Acct: cfg.player1Acct,
     player2Acct: cfg.player2Acct,
@@ -190,7 +184,7 @@ async function phaseAccept(state: TestState): Promise<void> {
   // (bot should DM each player with "send your tunes" message)
   const p1Reply = await waitForBotDM(
     state.player1Api,
-    state.botAccountId,
+    state.botHandle,
     acceptSentAt,
     state.waitTimeoutSec,
     state.debug,
@@ -201,7 +195,7 @@ async function phaseAccept(state: TestState): Promise<void> {
   if (state.player2Api && state.player2DmStatus) {
     const p2Reply = await waitForBotDM(
       state.player2Api,
-      state.botAccountId,
+      state.botHandle,
       acceptSentAt,
       state.waitTimeoutSec,
       state.debug,
@@ -238,7 +232,7 @@ async function phaseSubmit(state: TestState): Promise<void> {
 
       // Bot acknowledgements are standalone DMs (in_reply_to_id is null), so
       // look for any new bot post rather than a threaded reply.
-      const reply = await waitForBotDM(api, state.botAccountId, sentAt, 60, state.debug);
+      const reply = await waitForBotDM(api, state.botHandle, sentAt, 60, state.debug);
       if (reply) replies++;
 
       // Small delay to avoid rate limits

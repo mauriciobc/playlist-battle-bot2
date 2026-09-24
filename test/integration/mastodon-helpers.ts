@@ -60,6 +60,17 @@ class MastodonAPI {
     this.debug = debug;
   }
 
+  /**
+   * This account's instance, e.g. "ursal.zone".
+   *
+   * Needed to resolve unqualified `acct` values: Mastodon omits the instance
+   * for LOCAL accounts, so a bare acct only means something relative to the
+   * instance doing the looking.
+   */
+  get instance(): string {
+    return this.baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  }
+
   private async request(method: string, path: string, body?: unknown): Promise<any> {
     const url = `${this.baseUrl}/api/v1${path}`;
     const headers: Record<string, string> = {
@@ -349,21 +360,55 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Does a reported `acct` refer to the target handle?
+ *
+ * Mastodon reports LOCAL accounts unqualified ("saiugol") and REMOTE ones
+ * fully qualified ("user@host"). A bare acct therefore means "a user on the
+ * viewer's instance", not any user with that name - so the instance must be
+ * checked before the username. Comparing the local part alone is wrong: the
+ * bot is mauriciobc@mastodon.social and the player is mauriciobc@ursal.zone,
+ * so the player's own outgoing statuses would look like the bot's.
+ *
+ * Note: account IDs are NOT a safe substitute, because a remote account has
+ * a different ID on each viewing instance (the bot is 1474 on ursal.zone and
+ * 588005 on mastodon.social).
+ */
+export function acctMatches(
+  reportedAcct: string,
+  viewerInstance: string,
+  targetHandle: string,
+): boolean {
+  const clean = reportedAcct.replace(/^@/, "");
+  const [tUser, tHost] = targetHandle
+    .replace(/^@/, "")
+    .split("@")
+    .map((s) => s.toLowerCase());
+  // viewerInstance is a bare hostname like "mastodon.social" - no "@", so it
+  // must NOT be destructured the same way as the handle.
+  const vHost = viewerInstance.replace(/^@/, "").toLowerCase();
+
+  if (clean.includes("@")) {
+    // Qualified: both user and host must match exactly.
+    const [rUser, rHost] = clean.split("@").map((s) => s.toLowerCase());
+    return rUser === tUser && rHost === tHost;
+  }
+  // Unqualified: local to the viewer, so the target must live there too.
+  return clean.toLowerCase() === tUser && tHost === vHost;
+}
+
+/**
  * Wait for the bot to DM a player.
  *
- * Matching is on account ID, not handle. Mastodon reports a LOCAL account
- * unqualified ("saiugol") and a REMOTE one fully qualified ("user@host"),
- * and two different accounts can share a local part (the bot is
- * mauriciobc@mastodon.social, the player mauriciobc@ursal.zone), so any
- * handle comparison is ambiguous. Account IDs are globally unique.
+ * Uses acctMatches so a same-instance bot (reported as a bare username) and
+ * a cross-instance bot (reported as "user@host") are both handled, while the
+ * player's own statuses are never mistaken for the bot's.
  *
- * Cross-instance DMs do not produce mention notifications on the receiving
- * instance, so GET /notifications finds nothing; GET /conversations does
- * carry them.
+ * Cross-instance DMs produce no mention notification on the receiving
+ * instance, so GET /notifications finds nothing; GET /conversations does.
  */
 export async function waitForBotDM(
   playerApi: MastodonAPI,
-  botAccountId: string,
+  botHandle: string,
   since: string,
   timeoutSec: number,
   debug = false,
@@ -377,7 +422,7 @@ export async function waitForBotDM(
         const s = c.last_status;
         if (!s) continue;
         if (new Date(s.created_at) < new Date(since)) continue;
-        if (s.account.id !== botAccountId) continue;
+        if (!acctMatches(s.account.acct, playerApi.instance, botHandle)) continue;
         if (debug) console.log(`  ✓ Bot DM ${s.id} via conversation (@${s.account.acct})`);
         return s;
       }
@@ -386,6 +431,6 @@ export async function waitForBotDM(
     }
     await sleep(3000);
   }
-  if (debug) console.log(`  ✗ Timed out waiting for bot DM (account ${botAccountId})`);
+  if (debug) console.log(`  ✗ Timed out waiting for bot DM (${botHandle})`);
   return null;
 }
