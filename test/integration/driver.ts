@@ -305,12 +305,22 @@ const REFUSALS = [
   /cooldown/i,
   /n[aã]o entendi/i,
   /erro|error/i,
-  /invite|convite.*pendente/i,
+  // The bot answers, but no game exists: the length was outside 8..12.
+  // Missing this made a rejected game indistinguishable from a created one.
+  /playlist length must be between/i,
+  // "invited" appears in a SUCCESS announcement ("Challengers invited"), so
+  // a bare /invite/ substring test refuses a game the bot just created. Both
+  // real refusals are about a problem with an invitation:
+  //   "No pending invitation found for ..."
+  //   "convite pendente"
+  /no pending invitation|invitation not found|convite.*pendente/i,
 ];
 
-function isRefusal(text: string): boolean {
+export function isRefusalText(text: string): boolean {
   return REFUSALS.some((re) => re.test(text));
 }
+
+const isRefusal = isRefusalText;
 
 const t0 = Date.now();
 function say(msg: string) {
