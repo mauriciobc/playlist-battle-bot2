@@ -27,6 +27,8 @@ interface TestState {
   player1Api: MastodonAPI;
   player2Api: MastodonAPI | null;
   botAcct: string;
+  /** Fully-qualified bot handle, e.g. mauriciobc@mastodon.social. */
+  botHandle: string;
   hostAcct: string;
   player1Acct: string;
   player2Acct: string | null;
@@ -94,6 +96,7 @@ async function init(cfg: TestConfig): Promise<TestState> {
     player1Api,
     player2Api,
     botAcct: cfg.botAcct,
+    botHandle: `${cfg.botAcct}@${cfg.botInstance}`,
     hostAcct: cfg.hostAcct,
     player1Acct: cfg.player1Acct,
     player2Acct: cfg.player2Acct,
@@ -158,13 +161,13 @@ async function phaseAccept(state: TestState): Promise<void> {
 
   // Player 1 sends accept DM
   console.log(`  ${state.player1Acct}: sending accept DM`);
-  state.player1DmStatus = await state.player1Api.sendBotDM(state.botAcct, "accept");
+  state.player1DmStatus = await state.player1Api.sendBotDM(state.botHandle, "accept");
   console.log(`  DM sent: ${state.player1DmStatus.id}`);
 
   // Player 2 sends accept DM (if 2-player game)
   if (state.player2Api && state.player2Acct) {
     console.log(`  ${state.player2Acct}: sending accept DM`);
-    state.player2DmStatus = await state.player2Api.sendBotDM(state.botAcct, "accept");
+    state.player2DmStatus = await state.player2Api.sendBotDM(state.botHandle, "accept");
     console.log(`  DM sent: ${state.player2DmStatus.id}`);
   }
 
@@ -205,7 +208,7 @@ async function phaseSubmit(state: TestState): Promise<void> {
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       console.log(`  ${acct}: submitting tune ${i + 1}/${urls.length}: ${url}`);
-      const dm = await api.sendBotDM(state.botAcct, url);
+      const dm = await api.sendBotDM(state.botHandle, url);
 
       // Wait for acknowledgement (bot should confirm receipt)
       const reply = await waitForBotReply(api, state.botAcct, dm.id, 30, state.debug);
