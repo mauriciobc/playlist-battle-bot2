@@ -14,6 +14,7 @@ export type Messages = {
   cmdTagChallenger: () => string;
   cmdMaxChallengers: () => string;
   cmdDuplicateChallengers: () => string;
+  challengerLookupFailed: (acct: string) => string;
 
   // engine.ts (ValidationError)
   errThemeEmpty: () => string;
@@ -122,6 +123,7 @@ const en: Messages = {
   cmdTagChallenger: () => 'Tag at least 1 challenger: @bot newgame "theme" 8 @friend',
   cmdMaxChallengers: () => "Maximum 3 challengers (4 players total, poll limit).",
   cmdDuplicateChallengers: () => "Duplicate challengers in command.",
+  challengerLookupFailed: (acct: string) => "Could not find account \"" + acct + "\" — check the @user@instance format.",
 
   errThemeEmpty: () => "Theme must not be empty.",
   errThemeTooLong: (max) => `Theme must be at most ${max} characters.`,
@@ -280,6 +282,7 @@ const ptBR: Messages = {
   cmdTagChallenger: () => 'Mencione pelo menos 1 desafiante: @bot newgame "tema" 8 @amigo',
   cmdMaxChallengers: () => "Máximo de 3 desafiadores (4 jogadores no total, limite da enquete).",
   cmdDuplicateChallengers: () => "Desafiadores duplicados no comando.",
+  challengerLookupFailed: (acct: string) => "Conta \"" + acct + "\" não encontrada — verifique o formato @usuario@instancia.",
 
   errThemeEmpty: () => "O tema não pode ficar vazio.",
   errThemeTooLong: (max) => `O tema deve ter no máximo ${max} caracteres.`,

@@ -242,8 +242,15 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
     // Resolve challenger accounts (same or remote instance — federated polls count)
     const challengers = [];
     for (const acct of cmd.challengers) {
-      const info = await deps.lookup(acct);
-      challengers.push({ accountId: info.id, acct: info.acct });
+      try {
+        const info = await deps.lookup(acct);
+        challengers.push({ accountId: info.id, acct: info.acct });
+      } catch (err) {
+        if (err instanceof MastodonApiError) {
+          throw new ValidationError(m().challengerLookupFailed(acct));
+        }
+        throw err;
+      }
     }
 
     const host = {
@@ -315,6 +322,11 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
       });
       throw err;
     }
+    deps.log?.("game creation failed", {
+      statusId: input.statusId,
+      err: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 5) : undefined,
+    });
     const msg =
       err instanceof ValidationError || err instanceof RateLimitedError
         ? err.message
