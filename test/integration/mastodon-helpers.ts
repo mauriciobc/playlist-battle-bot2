@@ -328,3 +328,39 @@ export function waitFor(seconds: number, label: string): Promise<void> {
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * Wait for the bot to DM a player, using the PLAYER's notification feed.
+ *
+ * The bot's replies are standalone DMs (in_reply_to_id is null), so the
+ * threaded waitForBotReply cannot match them. The player receives a
+ * mention notification for each, which is the reliable signal.
+ */
+export async function waitForBotDM(
+  playerApi: MastodonAPI,
+  botAcct: string,
+  since: string,
+  timeoutSec: number,
+  debug = false,
+): Promise<MastodonStatus | null> {
+  const deadline = Date.now() + timeoutSec * 1000;
+  const norm = (s: string) => s.replace(/^@/, "").toLowerCase();
+
+  while (Date.now() < deadline) {
+    try {
+      const notifs = await playerApi.getNotifications(20);
+      for (const n of notifs) {
+        if (n.type !== "mention" || !n.status) continue;
+        if (new Date(n.created_at) < new Date(since)) continue;
+        if (norm(n.account.acct) !== norm(botAcct)) continue;
+        if (debug) console.log(`  ✓ Bot DM ${n.status.id} via notification`);
+        return n.status;
+      }
+    } catch {
+      // transient API error \u2014 keep polling
+    }
+    await sleep(3000);
+  }
+  if (debug) console.log(`  ✗ Timed out waiting for bot DM since ${since}`);
+  return null;
+}

@@ -18,7 +18,7 @@
  */
 
 import { loadConfig, type TestConfig } from "./config.js";
-import { MastodonAPI, waitForBotReply, waitForBotPost, waitForBotPoll, waitForBotFinale, waitFor, sleep, type MastodonStatus } from "./mastodon-helpers.js";
+import { MastodonAPI, waitForBotReply, waitForBotDM, waitForBotPost, waitForBotPoll, waitForBotFinale, waitFor, sleep, type MastodonStatus } from "./mastodon-helpers.js";
 
 // ─── Test state ──────────────────────────────────────────────
 
@@ -180,12 +180,24 @@ async function phaseAccept(state: TestState): Promise<void> {
 
   // Verify: check if bot replied with submission instructions
   // (bot should DM each player with "send your tunes" message)
-  const p1Reply = await waitForBotPost(state.hostApi, acceptSentAt, state.waitTimeoutSec, state.debug);
+  const p1Reply = await waitForBotDM(
+    state.player1Api,
+    state.botHandle,
+    acceptSentAt,
+    state.waitTimeoutSec,
+    state.debug,
+  );
   const p1Accepted = p1Reply !== null;
 
   let p2Accepted = true;
   if (state.player2Api && state.player2DmStatus) {
-    const p2Reply = await waitForBotPost(state.hostApi, acceptSentAt, state.waitTimeoutSec, state.debug);
+    const p2Reply = await waitForBotDM(
+      state.player2Api,
+      state.botHandle,
+      acceptSentAt,
+      state.waitTimeoutSec,
+      state.debug,
+    );
     p2Accepted = p2Reply !== null;
   }
 
@@ -218,7 +230,7 @@ async function phaseSubmit(state: TestState): Promise<void> {
 
       // Bot acknowledgements are standalone DMs (in_reply_to_id is null), so
       // look for any new bot post rather than a threaded reply.
-      const reply = await waitForBotPost(state.hostApi, sentAt, 30, state.debug);
+      const reply = await waitForBotDM(api, state.botHandle, sentAt, 60, state.debug);
       if (reply) replies++;
 
       // Small delay to avoid rate limits
