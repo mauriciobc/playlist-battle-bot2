@@ -206,6 +206,26 @@ class World {
 
 // ─── Driver primitives ─────────────────────────────────────────────────
 
+/**
+ * Replies that mean the bot refused the command.
+ *
+ * "bot replied in the thread" is not success on its own: the bot always
+ * answers, including with a refusal. Treating any reply as success let a
+ * game that was never created look like it had been.
+ */
+const REFUSALS = [
+  /n[aã]o encontrada|not found/i,
+  /jogador duplicado|duplicate player/i,
+  /cooldown/i,
+  /n[aã]o entendi/i,
+  /erro|error/i,
+  /invite|convite.*pendente/i,
+];
+
+function isRefusal(text: string): boolean {
+  return REFUSALS.some((re) => re.test(text));
+}
+
 const t0 = Date.now();
 function say(msg: string) {
   console.log(`[${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s] ${msg}`);
@@ -303,17 +323,30 @@ async function main() {
     const st = await player.postStatus(content);
     say(`  sent: ${content}`);
 
-    // The bot answers in the thread; its presence is the event.
-    await until(
+    // The bot always answers - so wait for a reply that is NOT a refusal.
+    // A refusal means no game exists, and every later step would be
+    // operating on a game that was never created.
+    const reply = await until(
       async () => {
         const ctx = await player.getStatusContext(st.id);
         const inThread = [...ctx.ancestors, ...ctx.descendants];
-        return inThread.find((s) => acctMatches(s.account.acct, cfg.player1Instance, world.botHandle));
+        const fromBot = inThread.filter((s) =>
+          acctMatches(s.account.acct, cfg.player1Instance, world.botHandle),
+        );
+        const clean = fromBot.find(
+          (s) => !isRefusal(s.content.replace(/<[^>]+>/g, " ")),
+        );
+        if (!clean && fromBot.length > 0) {
+          const why = fromBot[fromBot.length - 1]!.content.replace(/<[^>]+>/g, " ").trim();
+          say(`  ! bot refused: ${why.slice(0, 90)}`);
+        }
+        return clean;
       },
-      "bot replied in the thread",
+      "bot created the game (not a refusal)",
       cfg.backstop.create,
       world,
     );
+    say(`  bot: ${reply.content.replace(/<[^>]+>/g, " ").trim().slice(0, 100)}`);
 
     // Anchor everything after this to the game's own start.
     world.since = st.created_at;
@@ -327,17 +360,23 @@ async function main() {
     const before = (await world.playerDmActivity()).map((s) => s.id);
     await player.sendBotDM(world.botHandle, "accept");
 
-    await until(
+    // The bot's own answer can be a refusal, so look for the positive
+    // acknowledgement and surface anything negative it says on the way.
+    const reply = await until(
       async () => {
         const now = await world.playerDmActivity();
         const fresh = now.filter((s) => !before.includes(s.id));
-        return fresh.find((s) => /aceit|aceito|recusad|desafio aceito|entrou/i.test(s.text));
+        const refusal = fresh.find((s) => isRefusal(s.text));
+        if (refusal) say(`  ! bot refused: ${refusal.text.slice(0, 90)}`);
+        return fresh.find(
+          (s) => !isRefusal(s.text) && /aceit|aceito|desafio aceito|entrou|bem-vindo/i.test(s.text),
+        );
       },
       "bot acknowledged the acceptance",
       cfg.backstop.accept,
       world,
     );
-    return "challenger accepted";
+    return `challenger accepted: ${reply.text.slice(0, 60)}`;
   }, world);
 
   // ── 3. Submit ────────────────────────────────────────────────────────
