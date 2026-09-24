@@ -88,6 +88,28 @@ function loadConfig(): Cfg {
     return fromEnv.length > 0 ? fromEnv : FALLBACK_TUNES;
   };
 
+  // Both players must hold DIFFERENT videos in every round. If they share
+  // one, hasRoundCollision() (src/game/types.ts:125) treats the round as a
+  // tie and the bot never creates a poll - which is why every run finished
+  // auto_tied in seconds and the driver never got to vote. Rotating the
+  // fallback list by half its length pairs each round with a different video
+  // for the other player.
+  //
+  // An explicit TUNE_URLS_PLAYER1 in the environment is trusted as-is: if
+  // it overlaps the host's list on purpose, that is the operator's call.
+  const hostUrls = urls("TUNE_URLS_HOST");
+  let playerUrls = split("TUNE_URLS_PLAYER1");
+  if (playerUrls.length === 0) {
+    const half = Math.ceil(FALLBACK_TUNES.length / 2);
+    playerUrls = FALLBACK_TUNES.slice(half).concat(FALLBACK_TUNES.slice(0, half));
+  }
+  const shared = playerUrls.filter((u) => hostUrls.includes(u));
+  if (shared.length > 0) {
+    throw new Error(
+      `host and player share ${shared.length} tune URL(s); each round would auto-tie instead of polling: ${shared.slice(0, 3).join(", ")}`,
+    );
+  }
+
   return {
     hostInstance: vals.HOST_INSTANCE || "mastodon.social",
     hostToken: vals.HOST_TOKEN || "",
@@ -103,8 +125,8 @@ function loadConfig(): Cfg {
     theme: `${vals.GAME_THEME || vals.THEME || "E2E"} r${Date.now().toString(36)}`,
     playlistLength: n("PLAYLIST_LENGTH", 8),
     pollDurationSec: n("POLL_DURATION_SEC", 300),
-    tuneUrlsHost: urls("TUNE_URLS_HOST"),
-    tuneUrlsPlayer1: urls("TUNE_URLS_PLAYER1"),
+    tuneUrlsHost: hostUrls,
+    tuneUrlsPlayer1: playerUrls,
     debug: vals.DEBUG === "1" || vals.DEBUG === "true",
     backstop: {
       create: n("BACKSTOP_CREATE_SEC", 120),
