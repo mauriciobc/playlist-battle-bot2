@@ -372,12 +372,14 @@ async function main() {
         const fresh = now.filter((s) => !before.includes(s.id));
         const refusal = fresh.find((s) => isRefusal(s.text));
         if (refusal) say(`  ! bot refused: ${refusal.text.slice(0, 90)}`);
+        // The bot's acceptance is "Você está dentro! 🎵" (youAreIn).
+        // Its invite is "Você foi convidado para o duelo …" - never match
+        // that: an unaccepted game would look accepted.
         return fresh.find(
           (s) =>
             !isRefusal(s.text) &&
-            /aceit|entrou|dentro|inside|você está dentro|vc esta dentro|desafio aceito|bem-vindo|bem vindo/i.test(
-              s.text,
-            ),
+            !/convidado|convidada|invite/i.test(s.text) &&
+            /dentro|inside|aceit|entrou|desafio aceito|bem-vindo|bem vindo/i.test(s.text),
         );
       },
       "bot acknowledged the acceptance",
