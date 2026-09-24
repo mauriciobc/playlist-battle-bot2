@@ -200,22 +200,26 @@ export class MastodonClient {
         }
 
         if (res.status === 429) {
-          if (attempt < maxRetries) {
-            const retryAfter = Number(res.headers.get("Retry-After") ?? "1");
-            const delayMs = Math.max(0, retryAfter * 1000);
-            this.log?.warn(
-              { method, path, attempt: attempt + 1, delayMs, reason: "rate_limit" },
-              "mastodon request retry",
-            );
-            await this.sleep(delayMs);
-            attempt += 1;
-            bypassRateLimit = true;
-            continue;
-          }
           await safeJson(res);
+          // The 429 carries the same headers as a success, and this is the
+          // only moment they describe the exhausted bucket. Read them
+          // before deciding how long to wait.
+          this.trackRateLimit(res);
           const retryAfter = Number(res.headers.get("Retry-After") ?? "60");
           const resetAt = this.rateLimit?.resetAt ??
             (Number.isFinite(retryAfter) ? Math.floor(Date.now() / 1000) + retryAfter : Math.floor(Date.now() / 1000) + 60);
+          this.log?.warn(
+            {
+              method,
+              path,
+              limit: this.rateLimit?.limit ?? null,
+              remaining: this.rateLimit?.remaining ?? null,
+              resetsAt: new Date(resetAt * 1000).toISOString(),
+              retryAfterHeader: res.headers.get("Retry-After"),
+              resetHeader: res.headers.get("X-RateLimit-Reset"),
+            },
+            "mastodon rate limit exhausted",
+          );
           throw new RateLimitError(resetAt);
         }
 
@@ -265,12 +269,12 @@ export class MastodonClient {
   private trackRateLimit(res: Response): void {
     const limit = res.headers.get("X-RateLimit-Limit");
     const remaining = res.headers.get("X-RateLimit-Remaining");
-    const reset = res.headers.get("X-RateLimit-Reset");
-    if (limit !== null && remaining !== null && reset !== null) {
+    const resetAt = parseResetAt(res.headers.get("X-RateLimit-Reset"));
+    if (limit !== null && remaining !== null && resetAt !== null) {
       this.rateLimit = {
         limit: Number(limit),
         remaining: Number(remaining),
-        resetAt: Number(reset),
+        resetAt,
       };
     }
   }
@@ -281,6 +285,23 @@ export class MastodonClient {
       throw new RateLimitError(rl.resetAt);
     }
   }
+}
+
+/**
+ * Mastodon sends X-RateLimit-Reset as ISO8601: rack_attack.rb's
+ * throttled_responder writes `.iso8601(6)`, and a live header from
+ * mastodon.social reads 2026-09-24T14:25:00.380888Z. Number() on that is
+ * NaN, so rateLimit.resetAt was NaN, assertRateLimit's `resetAt * 1000 >
+ * Date.now()` was never true, and every backoff fell through to the
+ * Retry-After guess - which is why the logged reset advanced by exactly
+ * 60s on each attempt. Accept epoch seconds as well.
+ */
+function parseResetAt(raw: string | null): number | null {
+  if (raw === null || raw === "") return null;
+  const asNumber = Number(raw);
+  if (Number.isFinite(asNumber)) return asNumber;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
 }
 
 async function safeJson(res: Response): Promise<unknown> {
