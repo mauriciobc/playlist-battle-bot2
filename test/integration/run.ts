@@ -18,7 +18,7 @@
  */
 
 import { loadConfig, type TestConfig } from "./config.js";
-import { MastodonAPI, waitForBotReply, waitForBotPoll, waitForBotFinale, waitFor, sleep, type MastodonStatus } from "./mastodon-helpers.js";
+import { MastodonAPI, waitForBotReply, waitForBotPost, waitForBotPoll, waitForBotFinale, waitFor, sleep, type MastodonStatus } from "./mastodon-helpers.js";
 
 // ─── Test state ──────────────────────────────────────────────
 
@@ -159,6 +159,10 @@ async function phaseAccept(state: TestState): Promise<void> {
   await state.player1Api.clearNotifications();
   if (state.player2Api) await state.player2Api.clearNotifications();
 
+  // Bot DMs are standalone posts, not threaded replies, so record a timestamp
+  // to find the bot's response via waitForBotPost instead of waitForBotReply.
+  const acceptSentAt = new Date().toISOString();
+
   // Player 1 sends accept DM
   console.log(`  ${state.player1Acct}: sending accept DM`);
   state.player1DmStatus = await state.player1Api.sendBotDM(state.botHandle, "accept");
@@ -176,12 +180,12 @@ async function phaseAccept(state: TestState): Promise<void> {
 
   // Verify: check if bot replied with submission instructions
   // (bot should DM each player with "send your tunes" message)
-  const p1Reply = await waitForBotReply(state.player1Api, state.botAcct, state.player1DmStatus.id, state.waitTimeoutSec, state.debug);
+  const p1Reply = await waitForBotPost(state.hostApi, acceptSentAt, state.waitTimeoutSec, state.debug);
   const p1Accepted = p1Reply !== null;
 
   let p2Accepted = true;
   if (state.player2Api && state.player2DmStatus) {
-    const p2Reply = await waitForBotReply(state.player2Api, state.botAcct, state.player2DmStatus.id, state.waitTimeoutSec, state.debug);
+    const p2Reply = await waitForBotPost(state.hostApi, acceptSentAt, state.waitTimeoutSec, state.debug);
     p2Accepted = p2Reply !== null;
   }
 
@@ -208,11 +212,13 @@ async function phaseSubmit(state: TestState): Promise<void> {
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       console.log(`  ${acct}: submitting tune ${i + 1}/${urls.length}: ${url}`);
-      const dm = await api.sendBotDM(state.botHandle, url);
-
-      // Wait for acknowledgement (bot should confirm receipt)
-      const reply = await waitForBotReply(api, state.botAcct, dm.id, 30, state.debug);
+      const sentAt = new Date().toISOString();
+      await api.sendBotDM(state.botHandle, url);
       sent++;
+
+      // Bot acknowledgements are standalone DMs (in_reply_to_id is null), so
+      // look for any new bot post rather than a threaded reply.
+      const reply = await waitForBotPost(state.hostApi, sentAt, 30, state.debug);
       if (reply) replies++;
 
       // Small delay to avoid rate limits
