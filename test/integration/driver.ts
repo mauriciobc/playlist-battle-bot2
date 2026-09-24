@@ -41,6 +41,8 @@ interface Cfg {
   playlistLength: number;
   /** Rounds the proven tune pool can actually fill. */
   maxRounds: number;
+  /** Rounds the operator asked for, before clamping. */
+  requestedRounds: number;
   pollDurationSec: number;
   tuneUrlsHost: string[];
   tuneUrlsPlayer1: string[];
@@ -143,10 +145,8 @@ function loadConfig(): Cfg {
     // Never more rounds than there are distinct videos to fill them: a
     // player one tune short makes the round un-pollable and the game ends
     // with a default winner.
-    playlistLength: Math.min(
-      n("PLAYLIST_LENGTH", 8),
-      Math.floor(pool.length / 2),
-    ),
+    requestedRounds: n("PLAYLIST_LENGTH", 8),
+    playlistLength: Math.min(n("PLAYLIST_LENGTH", 8), Math.floor(pool.length / 2)),
     maxRounds: Math.floor(pool.length / 2),
     pollDurationSec: n("POLL_DURATION_SEC", 300),
     tuneUrlsHost: hostUrls,
@@ -388,9 +388,9 @@ async function main() {
   say(`  player  @${me.acct} (${me.id})`);
   say(`  bot     @${world.botHandle} (id ${botId})`);
   say(`  host    @${world.hostHandle}`);
-  if (cfg.playlistLength < cfg.maxRounds) {
+  if (cfg.requestedRounds !== cfg.playlistLength) {
     say(
-      `  ! only ${cfg.maxRounds} rounds fit the proven tune pool (one distinct video per player each) - running ${cfg.playlistLength}`,
+      `  ! PLAYLIST_LENGTH=${cfg.requestedRounds} but the proven tune pool fills at most ${cfg.maxRounds} rounds (one distinct video per player each) - running ${cfg.playlistLength}`,
     );
   }
   say(`  theme   "${cfg.theme}", ${cfg.playlistLength} tunes, poll ${cfg.pollDurationSec}s`);
