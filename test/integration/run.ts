@@ -18,7 +18,7 @@
  */
 
 import { loadConfig, type TestConfig } from "./config.js";
-import { MastodonAPI, waitForBotReply, waitForBotPoll, waitForBotFinale, sleep, type MastodonStatus } from "./mastodon-helpers.js";
+import { MastodonAPI, waitForBotReply, waitForBotPoll, waitForBotFinale, waitFor, sleep, type MastodonStatus } from "./mastodon-helpers.js";
 
 // ─── Test state ──────────────────────────────────────────────
 
