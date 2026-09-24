@@ -485,13 +485,13 @@ async function main() {
     const pollStatus = all.find((s) => s.hasPoll);
     if (!pollStatus?.poll) {
       const decided = all.find((s) =>
-        /rodada|round|campe[aã]o|empate|vencedor|final/i.test(s.text),
+        /rodada\s*\d+\s*:\s*(W\.O\.|empate|@)/i.test(s.text),
       );
       if (decided) {
         say("  all rounds already resolved before the driver could vote");
         return `rounds resolved without a driver vote: ${decided.text.slice(0, 70)}`;
       }
-      throw new Error("no poll and no round result to observe");
+      throw new Error("no poll and no resolved round to observe");
     }
     const poll = pollStatus.poll;
 
