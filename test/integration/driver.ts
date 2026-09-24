@@ -176,14 +176,14 @@ class World {
       .filter((s) => s.created_at > this.since)
       // Scope to this run's game, but never let the filter hide a poll or a
       // round result: those are the things later steps actually wait for.
-      .filter((s) => !this.gameTheme || s.hasPoll || s.text.includes(this.gameTheme))
+      .filter((s) => !this.gameTheme || Boolean(s.poll) || s.content.includes(this.gameTheme))
       .map((s) => ({
         id: s.id,
         at: s.created_at,
         text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
         visibility: s.visibility,
         hasPoll: Boolean(s.poll),
-        poll: s.poll,
+        poll: s.poll ?? null,
       }));
   }
 
@@ -203,7 +203,7 @@ class World {
         text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
         visibility: s.visibility,
         hasPoll: Boolean(s.poll),
-        poll: s.poll,
+        poll: s.poll ?? null,
       });
     }
     return out;
@@ -221,7 +221,12 @@ class World {
       bits.push(newest ? `newest="${newest.text.slice(0, 50)}"` : "newest=none");
       return bits.join(" ");
     } catch (e) {
-      return `unreadable: ${String(e).slice(0, 60)}`;
+      // Print it whole. A truncated message says "reading 'inc" and you end up
+      // guessing which property broke - which is exactly what happened twice
+      // while chasing this. Include the stack so the line is not a mystery.
+      const err = e as Error;
+      const where = err.stack?.split("\n").slice(0, 3).join(" | ") ?? "";
+      return `unreadable: ${err.name}: ${err.message} @ ${where}`;
     }
   }
 }
@@ -515,7 +520,7 @@ async function main() {
       async () => {
         const fresh = await world.botActivity();
         const p = fresh.find((s) => s.hasPoll)?.poll;
-        return p && p.voters_count > 0 ? p : undefined;
+        return p && (p.voters_count ?? 0) > 0 ? p : undefined;
       },
       `poll tallied ${2} votes`,
       cfg.backstop.poll,

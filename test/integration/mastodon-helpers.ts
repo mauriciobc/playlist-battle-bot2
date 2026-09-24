@@ -31,6 +31,19 @@ export interface MastodonPoll {
   id: string;
   expires_at: string | null;
   expired: boolean;
+  /** Whether multiple choices are allowed. */
+  multiple: boolean;
+  /** Total votes cast, counted with multiplicity. */
+  votes_count: number;
+  /** Distinct accounts that have voted. */
+  voters_count: number;
+  /**
+   * Whether the requesting account has voted. OMITTED when the request is
+   * unauthenticated - REST::PollSerializer emits it `if: :current_user?`.
+   */
+  voted?: boolean;
+  /** The requesting account's own choices. Same unauthenticated caveat. */
+  own_votes?: number[];
   options: { title: string; votes_count: number }[];
 }
 
@@ -433,7 +446,7 @@ export function acctMatches(
  * so a bare "mauriciobc" seen from mastodon.social is mauriciobc@mastodon.social.
  * Comparing handles only works after both sides are qualified.
  */
-function qualifyAcct(acct: string, viewerInstance: string): string {
+export function qualifyAcct(acct: string, viewerInstance: string): string {
   const clean = acct.replace(/^@/, "").toLowerCase();
   return clean.includes("@") ? clean : `${clean}@${viewerInstance.toLowerCase()}`;
 }
