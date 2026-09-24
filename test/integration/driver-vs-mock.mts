@@ -26,12 +26,59 @@ const REPO = resolve(HERE, "..", "..");
  * round. Sharing one makes hasRoundCollision() auto-tie the round and skip
  * the poll entirely, which is why so many earlier runs never reached a vote.
  */
+/**
+ * Sixteen proven YouTube ids.
+ *
+ * The bot enforces PLAYLIST_LENGTH between 8 and 12, so a five-id pool
+ * could never get past creation - it filled at most one round. The driver
+ * deals every other video to the host and the rest to the player, so 16
+ * ids give 8 each: enough for a legal game, with no shared video in a
+ * round (a shared one makes hasRoundCollision auto-tie it).
+ */
+/**
+ * Thirty-two proven YouTube ids, dealt 16 to the host and 16 to the
+ * player.
+ *
+ * loadConfig takes `pool` from TUNE_URLS_HOST and clamps rounds to
+ * floor(pool.length / 2) - it reads the HOST list, not the total. Eight
+ * per side therefore requested four rounds and the bot refused with
+ * "Playlist length must be between 8 and 12". Sixteen on the host gives
+ * the eight the bot's minimum requires, and sixteen distinct on the
+ * player keeps any round from auto-tieing on a shared video.
+ */
 const TUNES = [
   "https://www.youtube.com/watch?v=OPf0YbXqDm0",
   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   "https://www.youtube.com/watch?v=9bZkp7q19f0",
   "https://www.youtube.com/watch?v=kJQP7kiw5Fk",
   "https://www.youtube.com/watch?v=3JZ_D3ELwOQ",
+  "https://www.youtube.com/watch?v=CevxZvSJLk8",
+  "https://www.youtube.com/watch?v=YQHsXMglC9A",
+  "https://www.youtube.com/watch?v=hT_nvWreIhg",
+  "https://www.youtube.com/watch?v=nfWlot6h_JM",
+  "https://www.youtube.com/watch?v=09R8_2nJtjg",
+  "https://www.youtube.com/watch?v=JGwWNGJdvx8",
+  "https://www.youtube.com/watch?v=uelHwf8o7_U",
+  "https://www.youtube.com/watch?v=pRpeEdMmmQ0",
+  "https://www.youtube.com/watch?v=tVj0ZTS4WF4",
+  "https://www.youtube.com/watch?v=450p7goxZqg",
+  "https://www.youtube.com/watch?v=ru0K8uYEZWw",
+  "https://www.youtube.com/watch?v=L_jWHffIx1E",
+  "https://www.youtube.com/watch?v=hTWKbfoikeg",
+  "https://www.youtube.com/watch?v=nJb6m0L8v9o",
+  "https://www.youtube.com/watch?v=RgKAFK5djrM",
+  "https://www.youtube.com/watch?v=hFZFjoX2cGg",
+  "https://www.youtube.com/watch?v=60ItHLz5WEA",
+  "https://www.youtube.com/watch?v=lp-EO5I60KA",
+  "https://www.youtube.com/watch?v=fJ9rUzIMcZQ",
+  "https://www.youtube.com/watch?v=Mv6GtxtSlDY",
+  "https://www.youtube.com/watch?v=ktvTqknDobU",
+  "https://www.youtube.com/watch?v=ZbZSe6N_BXs",
+  "https://www.youtube.com/watch?v=y6120QOlsfU",
+  "https://www.youtube.com/watch?v=Bjft7mr9okw",
+  "https://www.youtube.com/watch?v=CevxZvSJLk0",
+  "https://www.youtube.com/watch?v=OU3FV5cM8GA",
+  "https://www.youtube.com/watch?v=e-ORhEE9VVg",
 ];
 
 function readEnvFile(path: string): Record<string, string> {
@@ -99,6 +146,18 @@ async function main(): Promise<void> {
   vals.HOST_TOKEN = endpoint.MOCK_HOST_TOKEN ?? "host-token";
   vals.PLAYER1_TOKEN = endpoint.MOCK_PLAYER_TOKEN ?? "player-token";
 
+  // The driver deals a single pool alternately (even -> host, odd -> player)
+  // and clamps rounds to floor(pool.length / 2). Handing it one pool of 16
+  // yields 8 rounds, the bot's minimum. Handing it pre-split 8 + 8 yields
+  // floor(8/2) = 4, which the bot rejects - the clamp is right, the split was
+  // the mistake.
+  // Split the pool here, so each side gets 8 distinct videos and the
+  // driver's floor(pool / 2) clamp lands on 8 - the bot's minimum. The driver
+  // refuses a shared video outright (hasRoundCollision would auto-tie the
+  // round), so the two lists must not overlap.
+  //
+  // TUNE_URLS_PLAYER1 is deleted, not blanked: split("") yields [""], which
+  // is a non-empty list and makes the driver hand the whole pool to both.
   const half = Math.floor(TUNES.length / 2);
   vals.TUNE_URLS_HOST = TUNES.slice(0, half).join(",");
   vals.TUNE_URLS_PLAYER1 = TUNES.slice(half).join(",");
