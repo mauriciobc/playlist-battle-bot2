@@ -378,22 +378,19 @@ export function acctMatches(
   viewerInstance: string,
   targetHandle: string,
 ): boolean {
-  const clean = reportedAcct.replace(/^@/, "");
-  const [tUser, tHost] = targetHandle
-    .replace(/^@/, "")
-    .split("@")
-    .map((s) => s.toLowerCase());
-  // viewerInstance is a bare hostname like "mastodon.social" - no "@", so it
-  // must NOT be destructured the same way as the handle.
-  const vHost = viewerInstance.replace(/^@/, "").toLowerCase();
+  return qualifyAcct(reportedAcct, viewerInstance) === qualifyAcct(targetHandle, viewerInstance);
+}
 
-  if (clean.includes("@")) {
-    // Qualified: both user and host must match exactly.
-    const [rUser, rHost] = clean.split("@").map((s) => s.toLowerCase());
-    return rUser === tUser && rHost === tHost;
-  }
-  // Unqualified: local to the viewer, so the target must live there too.
-  return clean.toLowerCase() === tUser && tHost === vHost;
+/**
+ * Expand a possibly-bare acct into a fully qualified "user@instance" handle.
+ *
+ * Mastodon omits the instance for accounts on the instance doing the looking,
+ * so a bare "mauriciobc" seen from mastodon.social is mauriciobc@mastodon.social.
+ * Comparing handles only works after both sides are qualified.
+ */
+function qualifyAcct(acct: string, viewerInstance: string): string {
+  const clean = acct.replace(/^@/, "").toLowerCase();
+  return clean.includes("@") ? clean : `${clean}@${viewerInstance.toLowerCase()}`;
 }
 
 /**
