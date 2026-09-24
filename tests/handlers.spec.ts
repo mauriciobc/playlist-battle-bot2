@@ -258,6 +258,29 @@ describe("handlers integration", () => {
     ]);
   });
 
+  it("returns user-friendly error when lookup fails (e.g. 404 on remote account)", async () => {
+    const { MastodonApiError } = await import("../src/mastodon/client.js");
+    deps.lookup = vi.fn(async () => {
+      throw new MastodonApiError(404, { error: "Record not found" });
+    });
+    const result = await handlePublicCommand(
+      {
+        accountId: "id-saiugol",
+        accountAcct: "saiugol",
+        statusId: "s-lookup-fail",
+        content: '<p>@<span>playlistbattle</span> newgame &quot;test&quot; 8 @<span>alice@remote.social</span></p>',
+        visibility: "public",
+        inReplyToId: null,
+      },
+      deps,
+    );
+    expect(result).toMatchObject({ kind: "error" });
+    expect(result.detail).toContain("remote.social");
+    // Should NOT be the generic "unexpected" error
+    expect(result.detail).not.toContain("inesperado");
+    expect(result.detail).not.toContain("unexpected");
+  });
+
   it("challenger DM accept → COLLECTING, bot DMs submission prompt", async () => {
     await createViaMention();
     posts.length = 0;
