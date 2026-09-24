@@ -402,6 +402,10 @@ async function main() {
     cfg.player1Token,
     cfg.debug,
   );
+  // The third voter. ROUND_QUORUM is 3 (src/game/scoring.ts:29), so two
+  // players always tie by rule, and the bot cannot supply the third
+  // vote because it owns the poll.
+  const voter = new MastodonAPI(cfg.voter1ApiUrl, cfg.voter1Token, cfg.debug);
   const world = new World(cfg, host, player);
 
   say("resolving identities…");
@@ -564,11 +568,15 @@ async function main() {
   //   - stop on a signal (the bot's own finale announcement, or the declared
   //     length played out), not on a fixed count
   await step("vote", async () => {
-    const castOn = new Map(
-      (Object.entries({ host, challenger: player }) as Array<[string, MastodonAPI]>).map(
-        ([label, api]) => [label, api],
-      ),
-    );
+    // Each voter and the option they back. The two players back option 0 and
+    // the spectator backs option 1, so the round resolves 2-1: ROUND_QUORUM is
+    // 3, and a unanimous tally would satisfy it without the bot ever
+    // comparing anything.
+    const castOn = new Map<string, [MastodonAPI, number]>([
+      ["host", [host, 0]],
+      ["challenger", [player, 0]],
+      ["voter", [voter, 1]],
+    ]);
     const votedPolls = new Set<string>();
     const tally: string[] = [];
     let round = 1;
@@ -609,10 +617,14 @@ async function main() {
 
       say(`  round ${round}: poll ${pollId} — ${open.poll.options.map((o) => o.title).join(" vs ")}`);
       const casts = castPlan(open.poll.options.length, 0);
-      for (const { label, choice } of casts) {
-        const api = castOn.get(label)!;
-        const r = await api.votePoll(open.id, pollId, [choice]);
-        tally.push(`${label}=${choice}:${r.voters_count ?? "?"}`);
+      for (const { label } of casts) {
+        const entry = castOn.get(label);
+        if (!entry) {
+          throw new Error(`no client for voter "${label}" - the cast plan and the client map disagree`);
+        }
+        const [api, pick] = entry;
+        const r = await api.votePoll(open.id, pollId, [pick]);
+        tally.push(`${label}=${pick}:${r.voters_count ?? "?"}`);
       }
       votedPolls.add(pollId);
       round += 1;
