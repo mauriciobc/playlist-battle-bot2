@@ -351,21 +351,24 @@ export function sleep(ms: number): Promise<void> {
 /**
  * Wait for the bot to DM a player.
  *
- * The bot's replies are standalone DMs (in_reply_to_id is null), so the
- * threaded waitForBotReply cannot match them. Worse, a cross-instance DM
- * (mastodon.social -> ursal.zone) does NOT generate a mention notification
- * on the receiving instance, so polling /notifications finds nothing even
- * though the message was delivered. GET /conversations does carry them.
+ * Matching is on account ID, not handle. Mastodon reports a LOCAL account
+ * unqualified ("saiugol") and a REMOTE one fully qualified ("user@host"),
+ * and two different accounts can share a local part (the bot is
+ * mauriciobc@mastodon.social, the player mauriciobc@ursal.zone), so any
+ * handle comparison is ambiguous. Account IDs are globally unique.
+ *
+ * Cross-instance DMs do not produce mention notifications on the receiving
+ * instance, so GET /notifications finds nothing; GET /conversations does
+ * carry them.
  */
 export async function waitForBotDM(
   playerApi: MastodonAPI,
-  botAcct: string,
+  botAccountId: string,
   since: string,
   timeoutSec: number,
   debug = false,
 ): Promise<MastodonStatus | null> {
   const deadline = Date.now() + timeoutSec * 1000;
-  const norm = (s: string) => s.replace(/^@/, "").toLowerCase();
 
   while (Date.now() < deadline) {
     try {
@@ -374,8 +377,8 @@ export async function waitForBotDM(
         const s = c.last_status;
         if (!s) continue;
         if (new Date(s.created_at) < new Date(since)) continue;
-        if (norm(s.account.acct) !== norm(botAcct)) continue;
-        if (debug) console.log(`  ✓ Bot DM ${s.id} via conversation`);
+        if (s.account.id !== botAccountId) continue;
+        if (debug) console.log(`  ✓ Bot DM ${s.id} via conversation (@${s.account.acct})`);
         return s;
       }
     } catch {
@@ -383,6 +386,6 @@ export async function waitForBotDM(
     }
     await sleep(3000);
   }
-  if (debug) console.log(`  ✗ Timed out waiting for bot DM since ${since}`);
+  if (debug) console.log(`  ✗ Timed out waiting for bot DM (account ${botAccountId})`);
   return null;
 }
