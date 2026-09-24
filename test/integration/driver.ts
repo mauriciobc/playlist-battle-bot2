@@ -18,6 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { driverExitCode } from "./driver-exit.js";
+import { openGames } from "../../src/game/types.js";
 import {
   MastodonAPI,
   acctMatches,
@@ -38,6 +39,8 @@ interface Cfg {
   player1Acct: string;
   theme: string;
   playlistLength: number;
+  /** Rounds the proven tune pool can actually fill. */
+  maxRounds: number;
   pollDurationSec: number;
   tuneUrlsHost: string[];
   tuneUrlsPlayer1: string[];
@@ -140,7 +143,11 @@ function loadConfig(): Cfg {
     // Never more rounds than there are distinct videos to fill them: a
     // player one tune short makes the round un-pollable and the game ends
     // with a default winner.
-    playlistLength: n("PLAYLIST_LENGTH", Math.min(8, Math.floor(pool.length / 2))),
+    playlistLength: Math.min(
+      n("PLAYLIST_LENGTH", 8),
+      Math.floor(pool.length / 2),
+    ),
+    maxRounds: Math.floor(pool.length / 2),
     pollDurationSec: n("POLL_DURATION_SEC", 300),
     tuneUrlsHost: hostUrls,
     tuneUrlsPlayer1: playerUrls,
@@ -381,6 +388,11 @@ async function main() {
   say(`  player  @${me.acct} (${me.id})`);
   say(`  bot     @${world.botHandle} (id ${botId})`);
   say(`  host    @${world.hostHandle}`);
+  if (cfg.playlistLength < cfg.maxRounds) {
+    say(
+      `  ! only ${cfg.maxRounds} rounds fit the proven tune pool (one distinct video per player each) - running ${cfg.playlistLength}`,
+    );
+  }
   say(`  theme   "${cfg.theme}", ${cfg.playlistLength} tunes, poll ${cfg.pollDurationSec}s`);
 
   // ── 1. Create ────────────────────────────────────────────────────────

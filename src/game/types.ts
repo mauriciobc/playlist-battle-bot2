@@ -26,6 +26,25 @@ export const TERMINAL_STATUSES: readonly GameStatus[] = [
   "CANCELLED",
 ];
 
+/**
+ * Whether a game still counts as open.
+ *
+ * The harness needs this to decide whether the environment is clean before
+ * a run, and an ad-hoc query is a trap: mine listed CLOSED/FINALIZED/
+ * CANCELLED, where FINALIZED is not a GameStatus and FIZZLED, EXPIRED and
+ * FORFEIT were missing. It reported a FIZZLED game as open. Everything that
+ * judges "open" must use this one definition, the same one
+ * openGamesForAccount gates on via NON_TERMINAL_STATUS_SQL.
+ */
+export function isOpen(status: GameStatus): boolean {
+  return !TERMINAL_STATUSES.includes(status);
+}
+
+/** Filter a mixed list down to the games that are still running. */
+export function openGames<T extends { status: GameStatus }>(games: ReadonlyArray<T>): T[] {
+  return games.filter((g) => isOpen(g.status));
+}
+
 export type PlayerRole = "host" | "challenger";
 export type InviteStatus = "pending" | "accepted" | "declined" | "expired";
 
