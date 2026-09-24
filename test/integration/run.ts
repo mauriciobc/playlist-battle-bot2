@@ -35,6 +35,7 @@ interface TestState {
   theme: string;
   playlistLength: number;
   pollDurationSec: number;
+  tuneUrlsHost: string[];
   tuneUrlsPlayer1: string[];
   tuneUrlsPlayer2: string[];
   waitTimeoutSec: number;
@@ -103,6 +104,7 @@ async function init(cfg: TestConfig): Promise<TestState> {
     theme: cfg.theme,
     playlistLength: cfg.playlistLength,
     pollDurationSec: cfg.pollDurationSec,
+    tuneUrlsHost: cfg.tuneUrlsHost,
     tuneUrlsPlayer1: cfg.tuneUrlsPlayer1,
     tuneUrlsPlayer2: cfg.tuneUrlsPlayer2,
     waitTimeoutSec: cfg.waitTimeoutSec,
