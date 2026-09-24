@@ -319,19 +319,23 @@ async function main() {
 
   // ── 1. Create ────────────────────────────────────────────────────────
   await step("create", async () => {
+    // The author of the public command becomes the host, so the host must
+    // post it and name the player as the challenger. Posting as the player
+    // made host and challenger the same account, which the bot correctly
+    // refused with "Jogador duplicado".
     const content = `@${world.botHandle} newgame "${cfg.theme}" ${cfg.playlistLength} ${world.playerHandle}`;
-    const st = await player.postStatus(content);
-    say(`  sent: ${content}`);
+    const st = await host.postStatus(content);
+    say(`  host posted: ${content}`);
 
     // The bot always answers - so wait for a reply that is NOT a refusal.
     // A refusal means no game exists, and every later step would be
     // operating on a game that was never created.
     const reply = await until(
       async () => {
-        const ctx = await player.getStatusContext(st.id);
+        const ctx = await host.getStatusContext(st.id);
         const inThread = [...ctx.ancestors, ...ctx.descendants];
         const fromBot = inThread.filter((s) =>
-          acctMatches(s.account.acct, cfg.player1Instance, world.botHandle),
+          acctMatches(s.account.acct, cfg.hostInstance, world.botHandle),
         );
         const clean = fromBot.find(
           (s) => !isRefusal(s.content.replace(/<[^>]+>/g, " ")),
