@@ -1,4 +1,4 @@
-MOCK_URL=http://127.0.0.1:43979
+MOCK_URL=http://127.0.0.1:44419
 MOCK_BOT_TOKEN=mock-token
 MOCK_HOST_TOKEN=host-token
 MOCK_PLAYER_TOKEN=player-token

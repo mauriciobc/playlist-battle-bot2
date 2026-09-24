@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isRefusalText } from "../test/integration/driver.js";
+import { isRefusalText } from "../test/integration/driver-replies.js";
 
 /**
  * The bare /invite/ alternative matched "Challengers invited" in a success

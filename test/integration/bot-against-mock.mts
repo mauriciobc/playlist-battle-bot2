@@ -63,6 +63,11 @@ Object.assign(process.env, {
   LOG_PRETTY: "0",
   EARLY_CLOSE_MIN_AGE_SEC: "120",
   EARLY_CLOSE_STAGNATION_SEC: "120",
+  // A 600s creation cooldown carries over between runs and makes every
+  // subsequent run refuse before creating anything. Each run starts a fresh
+  // bot, so the cooldown has nothing to protect here.
+  CREATION_COOLDOWN_SEC: "0",
+  MAX_GAMES_PER_PLAYER: "99",
 });
 
 // The bot's own main() installs its intervals and returns; this keeps serving.

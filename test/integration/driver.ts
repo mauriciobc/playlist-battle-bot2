@@ -20,8 +20,8 @@ import { readFileSync } from "node:fs";
 import { driverExitCode } from "./driver-exit.js";
 import { resolveBaseUrl } from "./mastodon-helpers.js";
 import { openGames } from "../../src/game/types.js";
-import {
-  MastodonAPI,
+import { isRefusal, isRefusalText, looksLikeAcceptance } from "./driver-replies.js";
+import {  MastodonAPI,
   acctMatches,
   qualifyAcct,
   type MastodonPoll,
@@ -290,49 +290,26 @@ class World {
   }
 }
 
-// ─── Driver primitives ─────────────────────────────────────────────────
-
-/**
- * Replies that mean the bot refused the command.
- *
- * "bot replied in the thread" is not success on its own: the bot always
- * answers, including with a refusal. Treating any reply as success let a
- * game that was never created look like it had been.
- */
-const REFUSALS = [
-  /n[aã]o encontrada|not found/i,
-  /jogador duplicado|duplicate player/i,
-  /cooldown/i,
-  /n[aã]o entendi/i,
-  /erro|error/i,
-  // The bot answers, but no game exists: the length was outside 8..12.
-  // Missing this made a rejected game indistinguishable from a created one.
-  /playlist length must be between/i,
-  // "invited" appears in a SUCCESS announcement ("Challengers invited"), so
-  // a bare /invite/ substring test refuses a game the bot just created. Both
-  // real refusals are about a problem with an invitation:
-  //   "No pending invitation found for ..."
-  //   "convite pendente"
-  /no pending invitation|invitation not found|convite.*pendente/i,
-];
-
-export function isRefusalText(text: string): boolean {
-  return REFUSALS.some((re) => re.test(text));
-}
-
-const isRefusal = isRefusalText;
-
 const t0 = Date.now();
 function say(msg: string) {
   console.log(`[${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s] ${msg}`);
 }
 
+/**
+ * Raised when a backstop deadline passes: the event being waited for
+ * never happened, so nothing downstream may assume it did.
+ */
 class Backstop extends Error {
-  constructor(readonly label: string, readonly snapshot: string) {
+  constructor(
+    readonly label: string,
+    readonly snapshot: string,
+  ) {
     super(`event never occurred: ${label}`);
     this.name = "Backstop";
   }
 }
+
+// ─── Driver primitives ─────────────────────────────────────────────────
 
 /**
  * Wait until `probe` yields a truthy value, then return it.
@@ -477,15 +454,10 @@ async function main() {
         const fresh = now.filter((s) => !before.includes(s.id));
         const refusal = fresh.find((s) => isRefusal(s.text));
         if (refusal) say(`  ! bot refused: ${refusal.text.slice(0, 90)}`);
-        // The bot's acceptance is "Você está dentro! 🎵" (youAreIn).
-        // Its invite is "Você foi convidado para o duelo …" - never match
-        // that: an unaccepted game would look accepted.
-        return fresh.find(
-          (s) =>
-            !isRefusal(s.text) &&
-            !/convidado|convidada|invite/i.test(s.text) &&
-            /dentro|inside|aceit|entrou|desafio aceito|bem-vindo|bem vindo/i.test(s.text),
-        );
+        // Both locales ship this: "You're in! 🎵" / "Você está dentro! 🎵".
+        // looksLikeAcceptance rejects the invitation wording itself, since the
+        // bot sends "You're invited to duel" in the message right before.
+        return fresh.find((s) => !isRefusal(s.text) && looksLikeAcceptance(s.text));
       },
       "bot acknowledged the acceptance",
       cfg.backstop.accept,
