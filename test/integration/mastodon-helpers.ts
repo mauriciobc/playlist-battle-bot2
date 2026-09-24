@@ -17,6 +17,7 @@ export interface MastodonAccount {
 }
 
 export interface MastodonStatus {
+  created_at: string;
   id: string;
   content: string;
   visibility: string;
@@ -31,6 +32,13 @@ export interface MastodonPoll {
   expires_at: string | null;
   expired: boolean;
   options: { title: string; votes_count: number }[];
+}
+
+export interface MastodonConversation {
+  id: string;
+  unread: boolean;
+  accounts: { id: string; username: string; acct: string }[];
+  last_status: MastodonStatus | null;
 }
 
 export interface MastodonNotification {
@@ -111,6 +119,17 @@ class MastodonAPI {
   /** Get the latest N notifications. */
   async getNotifications(limit = 20): Promise<MastodonNotification[]> {
     return this.request("GET", `/notifications?limit=${limit}`);
+  }
+
+  /**
+   * Get recent direct-message conversations.
+   *
+   * Cross-instance DMs (mastodon.social -> ursal.zone) do NOT generate
+   * mention notifications on the receiving side, but they DO appear here.
+   * This is the reliable signal for the bot's replies to a player.
+   */
+  async getConversations(limit = 20): Promise<MastodonConversation[]> {
+    return this.request("GET", `/conversations?limit=${limit}`);
   }
 
   /** Clear all notifications (so we can detect new ones). */
@@ -330,11 +349,13 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Wait for the bot to DM a player, using the PLAYER's notification feed.
+ * Wait for the bot to DM a player.
  *
  * The bot's replies are standalone DMs (in_reply_to_id is null), so the
- * threaded waitForBotReply cannot match them. The player receives a
- * mention notification for each, which is the reliable signal.
+ * threaded waitForBotReply cannot match them. Worse, a cross-instance DM
+ * (mastodon.social -> ursal.zone) does NOT generate a mention notification
+ * on the receiving instance, so polling /notifications finds nothing even
+ * though the message was delivered. GET /conversations does carry them.
  */
 export async function waitForBotDM(
   playerApi: MastodonAPI,
@@ -348,16 +369,17 @@ export async function waitForBotDM(
 
   while (Date.now() < deadline) {
     try {
-      const notifs = await playerApi.getNotifications(20);
-      for (const n of notifs) {
-        if (n.type !== "mention" || !n.status) continue;
-        if (new Date(n.created_at) < new Date(since)) continue;
-        if (norm(n.account.acct) !== norm(botAcct)) continue;
-        if (debug) console.log(`  ✓ Bot DM ${n.status.id} via notification`);
-        return n.status;
+      const convs = await playerApi.getConversations(20);
+      for (const c of convs) {
+        const s = c.last_status;
+        if (!s) continue;
+        if (new Date(s.created_at) < new Date(since)) continue;
+        if (norm(s.account.acct) !== norm(botAcct)) continue;
+        if (debug) console.log(`  ✓ Bot DM ${s.id} via conversation`);
+        return s;
       }
     } catch {
-      // transient API error \u2014 keep polling
+      // transient API error — keep polling
     }
     await sleep(3000);
   }
