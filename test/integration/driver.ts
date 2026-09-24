@@ -373,7 +373,11 @@ async function main() {
         const refusal = fresh.find((s) => isRefusal(s.text));
         if (refusal) say(`  ! bot refused: ${refusal.text.slice(0, 90)}`);
         return fresh.find(
-          (s) => !isRefusal(s.text) && /aceit|aceito|desafio aceito|entrou|bem-vindo/i.test(s.text),
+          (s) =>
+            !isRefusal(s.text) &&
+            /aceit|entrou|dentro|inside|você está dentro|vc esta dentro|desafio aceito|bem-vindo|bem vindo/i.test(
+              s.text,
+            ),
         );
       },
       "bot acknowledged the acceptance",
