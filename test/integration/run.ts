@@ -46,6 +46,8 @@ interface TestState {
 
   // Game state
   gameCreatedStatus: MastodonStatus | null;
+  /** Timestamp of the last tune submission - phase 4's anchor. */
+  lastSubmitAt: string | null;
   gameUrl: string | null;
   player1DmStatus: MastodonStatus | null;
   player2DmStatus: MastodonStatus | null;
@@ -113,6 +115,7 @@ async function init(cfg: TestConfig): Promise<TestState> {
     finaleTimeoutSec: cfg.finaleTimeoutSec,
     debug: cfg.debug,
     gameCreatedStatus: null,
+    lastSubmitAt: null,
     gameUrl: null,
     player1DmStatus: null,
     player2DmStatus: null,
@@ -214,55 +217,65 @@ async function phaseSubmit(state: TestState): Promise<void> {
   const start = Date.now();
   log("🎵 Phase 3: Players submit tunes");
 
-  // Helper: submit tunes one by one via DM
+  /**
+   * Submit one player's tunes.
+   *
+   * Deliberately does NOT wait for a per-tune acknowledgement. A same-instance
+   * DM is absent from /conversations, so an ack wait there burns 60s per tune
+   * and the host alone spent ~8 minutes waiting for messages it structurally
+   * cannot observe. The real completion signal is the poll, which the bot only
+   * posts once BOTH players have submitted - that is phase 4's job.
+   *
+   * acksSeen is informational: it reports how many confirmations were
+   * observable, and is never the pass/fail criterion.
+   */
   async function submitTunes(
     api: MastodonAPI,
     acct: string,
     urls: string[],
-  ): Promise<{ sent: number; replies: number }> {
+    waitForAcks: boolean,
+  ): Promise<{ sent: number; acks: number }> {
     let sent = 0;
-    let replies = 0;
+    let acks = 0;
 
-    for (let i = 0; i < urls.length; i++) {
-      const url = urls[i];
-      console.log(`  ${acct}: submitting tune ${i + 1}/${urls.length}: ${url}`);
-      const sentAt = new Date().toISOString();
-      await api.sendBotDM(state.botHandle, url);
+    for (const url of urls) {
       sent++;
+      await api.sendBotDM(state.botHandle, url);
 
-      // Bot acknowledgements are standalone DMs (in_reply_to_id is null), so
-      // look for any new bot post rather than a threaded reply.
-      const reply = await waitForBotDM(api, state.botHandle, sentAt, 60, state.debug);
-      if (reply) replies++;
-
-      // Small delay to avoid rate limits
-      await sleep(1500);
+      if (waitForAcks) {
+        const sentAt = new Date(Date.now() - 1000).toISOString();
+        const reply = await waitForBotDM(api, state.botHandle, sentAt, 15, state.debug);
+        if (reply) acks++;
+      } else {
+        // Space submissions so the bot's notification loop can keep up.
+        await sleep(1500);
+      }
     }
 
-    return { sent, replies };
+    return { sent, acks };
   }
 
-  // Submit HOST tunes. A round only starts when BOTH players have submitted,
-  // so skipping the host leaves the game stuck in COLLECTING forever.
-  const host = await submitTunes(state.hostApi, state.hostAcct, state.tuneUrlsHost);
-  console.log(`  HOST: sent ${host.sent}, acknowledged ${host.replies}`);
+  // The challenger is cross-instance: its acks ARE observable via
+  // /conversations, so confirming them is cheap and worth doing. The host is
+  // same-instance, where they are not - waiting there only wastes the clock.
+  const host = await submitTunes(state.hostApi, state.hostAcct, state.tuneUrlsHost, false);
+  console.log(`  HOST: sent ${host.sent} (acks not observable same-instance, not awaited)`);
 
-  // Submit player 1 tunes
-  const p1 = await submitTunes(state.player1Api, state.player1Acct, state.tuneUrlsPlayer1);
-  console.log(`  P1: sent ${p1.sent}, acknowledged ${p1.replies}`);
+  const p1 = await submitTunes(state.player1Api, state.player1Acct, state.tuneUrlsPlayer1, true);
+  console.log(`  P1: sent ${p1.sent}, acknowledged ${p1.acks}`);
 
-  // Submit player 2 tunes
-  let p2 = { sent: 0, replies: 0 };
+  let p2 = { sent: 0, acks: 0 };
   if (state.player2Api && state.player2Acct) {
-    p2 = await submitTunes(state.player2Api, state.player2Acct, state.tuneUrlsPlayer2);
-    console.log(`  P2: sent ${p2.sent}, acknowledged ${p2.replies}`);
+    p2 = await submitTunes(state.player2Api, state.player2Acct, state.tuneUrlsPlayer2, true);
+    console.log(`  P2: sent ${p2.sent}, acknowledged ${p2.acks}`);
   }
 
-  const hostOk = host.replies > 0;
-  const p1Ok = p1.replies > 0;
-  const p2Ok = !state.player2Acct || p2.replies > 0;
-  const passed = hostOk && p1Ok && p2Ok;
-  const detail = `HOST: ${host.replies}/${host.sent}, P1: ${p1.replies}/${p1.sent}${state.player2Acct ? `, P2: ${p2.replies}/${p2.sent}` : ""} ack'd`;
+  state.lastSubmitAt = new Date().toISOString();
+  const totalSent = host.sent + p1.sent + p2.sent;
+  const expected = state.playlistLength * (state.player2Acct ? 3 : 2);
+  const passed = totalSent === expected;
+  const detail = `${totalSent}/${expected} submitted` +
+    (p1.acks ? `, P1 acks ${p1.acks}/${p1.sent}` : "");
   check("submit", passed, detail, start, state);
 }
 
@@ -272,13 +285,18 @@ async function phasePoll(state: TestState): Promise<void> {
   const start = Date.now();
   log("📊 Phase 4: Wait for first poll round");
 
-  // Use the bot's own account to check for new poll statuses — more reliable than notifications
-  const timeout = state.pollDurationSec + 60;
-  const since = new Date().toISOString();
+  // The bot posts a poll only once BOTH players have submitted, so the poll
+  // IS the completion signal - not a timer. The timeout below is a backstop
+  // that stops the run hanging forever; it is not what we wait on.
+  // The poll arrives in reply to the DM thread, so anchor on the last
+  // submission rather than "now".
+  const timeout = state.pollDurationSec + 120;
+  const since = state.lastSubmitAt ?? new Date().toISOString();
 
-  console.log(`  Waiting up to ${timeout}s for bot to post a poll...`);
+  console.log(`  Waiting for bot to post a poll (backstop ${timeout}s)...`);
   const poll = await waitForBotPoll(
-    state.hostApi, // hostApi is on the same instance as the bot
+    state.player1Api, // can see the bot's public statuses across instances
+    state.botHandle,
     since,
     timeout,
     (state.pollCheckIntervalSec || 5) * 1000,
@@ -286,17 +304,18 @@ async function phasePoll(state: TestState): Promise<void> {
   );
 
   if (poll) {
-    state.pollStatuses.push(poll);
     console.log(`  Poll status ID: ${poll.id}`);
     if (poll.poll) {
       console.log(`  Options: ${poll.poll.options.map((o) => o.title).join(" vs ")}`);
     }
   }
 
+  if (poll) state.pollStatuses.push(poll);
+
   const passed = poll !== null;
   const detail = passed
-    ? `Found poll ${poll!.id}`
-    : `No polls after ${timeout}s — bot may not have posted`;
+    ? `Found poll ${poll!.id} (${poll!.poll?.options.length ?? 0} options)`
+    : `No poll from bot within ${timeout}s backstop`;
 
   check("poll", passed, detail, start, state);
 }
@@ -357,12 +376,14 @@ async function phaseFinale(state: TestState): Promise<void> {
   // After all polls resolve, the bot should post a finale announcement
   // This could take several poll durations. Wait a reasonable time.
   const totalWait = state.finaleTimeoutSec || 900;
-  const since = new Date().toISOString();
+  // Anchor on the poll: the finale comes after the rounds resolve.
+  const since = state.pollStatuses[0]?.created_at ?? new Date().toISOString();
 
-  console.log(`  Waiting up to ${totalWait}s for finale...`);
+  console.log(`  Waiting for finale announcement (backstop ${totalWait}s)...`);
 
   const finale = await waitForBotFinale(
-    state.hostApi,
+    state.player1Api,
+    state.botHandle,
     since,
     totalWait,
     (state.pollCheckIntervalSec || 10) * 1000,

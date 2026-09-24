@@ -71,6 +71,11 @@ class MastodonAPI {
     return this.baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
   }
 
+  /** Public GET, for module-level helpers that poll an API. */
+  async get<T = any>(path: string): Promise<T> {
+    return this.request("GET", path);
+  }
+
   private async request(method: string, path: string, body?: unknown): Promise<any> {
     const url = `${this.baseUrl}/api/v1${path}`;
     const headers: Record<string, string> = {
@@ -79,11 +84,9 @@ class MastodonAPI {
     };
     if (this.debug) console.log(`  → ${method} ${path}`);
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const init: RequestInit = { method, headers };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    const res = await fetch(url, init);
 
     if (!res.ok) {
       const text = await res.text();
@@ -165,6 +168,24 @@ class MastodonAPI {
     return this.request("POST", `/polls/${pollId}/vote`, { choices });
   }
 
+  /** Look up an account by handle, returning its id. */
+  async resolveAccountId(handle: string): Promise<string> {
+    const acct = await this.lookupAccount(handle);
+    return acct.id;
+  }
+
+  /**
+   * Public/unlisted statuses of an account, newest first.
+   *
+   * The harness holds no bot token, so it reads the bot's timeline through
+   * whichever player API can see it. Polls and finales are posted publicly,
+   * so this is where they are observable.
+   */
+  async getAccountStatusesByHandle(handle: string, limit = 20): Promise<MastodonStatus[]> {
+    const acct = await this.lookupAccount(handle);
+    return this.request("GET", `/accounts/${acct.id}/statuses?limit=${limit}`);
+  }
+
   /** Look up an account by username. */
   async lookupAccount(username: string): Promise<MastodonAccount> {
     return this.request("GET", `/accounts/lookup?acct=${encodeURIComponent(username)}`);
@@ -174,61 +195,80 @@ class MastodonAPI {
 export { MastodonAPI };
 
 /** Wait for the bot to post a poll status. Checks bot's own account statuses. */
+/**
+ * Wait for the bot to post a poll.
+ *
+ * Reads the bot's own timeline via `viewerApi` (the harness holds no bot
+ * token) instead of the caller's own statuses. `since` is the last
+ * submission time: the poll appears only once BOTH players have submitted,
+ * so its arrival is the real signal that submission finished.
+ *
+ * timeoutSec is a backstop, not the trigger.
+ */
 export async function waitForBotPoll(
-  botApi: MastodonAPI,
+  viewerApi: MastodonAPI,
+  botHandle: string,
   since: string,
   timeoutSec: number,
   pollIntervalMs = 5000,
   debug = false,
 ): Promise<MastodonStatus | null> {
   const deadline = Date.now() + timeoutSec * 1000;
-  const me = await botApi.getMe();
 
   while (Date.now() < deadline) {
     try {
-      const recent: MastodonStatus[] = await botApi.request("GET", `/accounts/${me.id}/statuses?limit=10`);
+      const recent = await viewerApi.getAccountStatusesByHandle(botHandle, 20);
       for (const s of recent) {
         if (new Date(s.created_at) > new Date(since) && s.poll) {
-          if (debug) console.log(`  ✓ Bot posted poll: ${s.id}`);
+          if (debug) console.log(`  \u2713 Bot posted poll ${s.id}`);
           return s;
         }
       }
     } catch {
-      // Ignore transient errors
+      // transient API error - keep polling until the backstop expires
     }
     await sleep(pollIntervalMs);
   }
-  if (debug) console.log(`  ✗ Timed out waiting for bot poll`);
+  if (debug) console.log(`  \u2717 No poll from @${botHandle} within ${timeoutSec}s`);
   return null;
 }
 
 /** Wait for the bot to post a finale status (non-reply with 🏆 or encerrad). */
+/**
+ * Wait for the bot to announce the finale. Reads the bot's timeline via
+ * `viewerApi`; timeoutSec is a backstop, not the trigger.
+ */
 export async function waitForBotFinale(
-  botApi: MastodonAPI,
+  viewerApi: MastodonAPI,
+  botHandle: string,
   since: string,
   timeoutSec: number,
   pollIntervalMs = 10000,
   debug = false,
 ): Promise<MastodonStatus | null> {
   const deadline = Date.now() + timeoutSec * 1000;
-  const me = await botApi.getMe();
+  const seen = new Set<string>();
 
   while (Date.now() < deadline) {
     try {
-      const recent: MastodonStatus[] = await botApi.request("GET", `/accounts/${me.id}/statuses?limit=10`);
+      const recent = await viewerApi.getAccountStatusesByHandle(botHandle, 20);
       for (const s of recent) {
-        if (new Date(s.created_at) > new Date(since) && !s.in_reply_to_id &&
-            (s.content.includes("🏆") || s.content.includes("winner") || s.content.includes("encerrad"))) {
-          if (debug) console.log(`  ✓ Bot posted finale: ${s.id}`);
+        if (new Date(s.created_at) <= new Date(since)) continue;
+        if (s.visibility === "direct") continue;
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        const text = s.content.replace(/<[^>]+>/g, "").toLowerCase();
+        if (/\ud83c\udfc6|\ud83c\udfc6|final|encerrad|vencedor|terminou|acabou/.test(text)) {
+          if (debug) console.log(`  \u2713 Finale found: ${s.id}`);
           return s;
         }
       }
     } catch {
-      // Ignore transient errors
+      // transient API error - keep polling until the backstop expires
     }
     await sleep(pollIntervalMs);
   }
-  if (debug) console.log(`  ✗ Timed out waiting for bot finale`);
+  if (debug) console.log(`  \u2717 No finale from @${botHandle} within ${timeoutSec}s`);
   return null;
 }
 
@@ -257,8 +297,9 @@ export async function waitForNotification(
         return n;
       }
     }
-    if (notifs.length > 0) {
-      lastSeenId = notifs[0].id;
+    const newest = notifs[0];
+    if (newest) {
+      lastSeenId = newest.id;
     }
     await sleep(pollIntervalMs);
   }
@@ -328,7 +369,7 @@ export async function waitForBotPost(
 
   while (Date.now() < deadline) {
     try {
-      const recent: MastodonStatus[] = await botApi.request("GET", `/accounts/${me.id}/statuses?limit=5`);
+      const recent: MastodonStatus[] = await botApi.get(`/accounts/${me.id}/statuses?limit=5`);
       for (const s of recent) {
         if (new Date(s.created_at) > new Date(since) && !s.in_reply_to_id) {
           if (debug) console.log(`  ✓ Bot posted new status: ${s.id}`);

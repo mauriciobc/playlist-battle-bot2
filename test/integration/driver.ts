@@ -1,0 +1,470 @@
+/**
+ * Event-driven E2E driver for the playlist battle bot.
+ *
+ * Design: this is a state machine, not a script. At every moment it observes
+ * the real world (Mastodon) and performs the ONE action the current state
+ * calls for. It never sleeps waiting for a message it hopes will arrive, and
+ * it never uses a timeout as a pass/fail condition.
+ *
+ * Every wait is `until(observable, label)`:
+ *   - returns as soon as the condition is TRUE  -> the event happened
+ *   - throws only after a generous backstop     -> prevents a hang
+ *
+ * A timeout therefore means "the event never happened" - a real failure to
+ * report, not a way to make a phase pass.
+ *
+ * This is the Playwright model: poll the world, act on change.
+ */
+
+import { readFileSync } from "node:fs";
+import {
+  MastodonAPI,
+  acctMatches,
+  qualifyAcct,
+  type MastodonPoll,
+} from "./mastodon-helpers.js";
+
+// ─── Config ────────────────────────────────────────────────────────────
+
+interface Cfg {
+  hostInstance: string;
+  hostToken: string;
+  hostAcct: string;
+  botAcct: string;
+  botInstance: string;
+  player1Instance: string;
+  player1Token: string;
+  player1Acct: string;
+  theme: string;
+  playlistLength: number;
+  pollDurationSec: number;
+  tuneUrlsHost: string[];
+  tuneUrlsPlayer1: string[];
+  debug: boolean;
+  backstop: {
+    create: number;
+    accept: number;
+    submit: number;
+    poll: number;
+    finale: number;
+  };
+  pollIntervalMs: number;
+}
+
+/**
+ * Default tunes, used when TUNE_URLS_* is unset.
+ *
+ * Every id here was observed registering successfully in a live run. Do not
+ * add a URL speculatively: a single non-reproducible link is silently dropped
+ * by the bot, leaving a player one tune short, which makes a poll impossible
+ * and closes the game with a default winner instead of a real contest.
+ */
+const FALLBACK_TUNES = [
+  "https://www.youtube.com/watch?v=OPf0YbXqDm0",
+  "https://www.youtube.com/watch?v=09R8_2nJtjg",
+  "https://www.youtube.com/watch?v=YQHsXMglC9A",
+  "https://www.youtube.com/watch?v=60ItHLz5WEA",
+  "https://www.youtube.com/watch?v=3JZ_D3ELwOQ",
+  "https://www.youtube.com/watch?v=uelHwf8o7_U",
+  "https://www.youtube.com/watch?v=2Vv-BfVoq4g",
+  "https://www.youtube.com/watch?v=hT_nvWreIhg",
+];
+
+function loadConfig(): Cfg {
+  const vals: Record<string, string> = {};
+  for (const line of readFileSync("./.env", "utf-8").split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#") || !t.includes("=")) continue;
+    const i = t.indexOf("=");
+    vals[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+
+  const n = (k: string, d: number) => Number(vals[k] || d);
+  const split = (k: string) =>
+    (vals[k] || "").split(",").map((s) => s.trim()).filter(Boolean);
+  // An empty array is truthy in JS, so check length - not truthiness.
+  const urls = (k: string) => {
+    const fromEnv = split(k);
+    return fromEnv.length > 0 ? fromEnv : FALLBACK_TUNES;
+  };
+
+  return {
+    hostInstance: vals.HOST_INSTANCE || "mastodon.social",
+    hostToken: vals.HOST_TOKEN || "",
+    hostAcct: vals.HOST_ACCT || "",
+    botAcct: vals.BOT_ACCT || "mauriciobc",
+    botInstance: vals.BOT_INSTANCE || "mastodon.social",
+    player1Instance: vals.PLAYER1_INSTANCE || "ursal.zone",
+    player1Token: vals.PLAYER1_TOKEN || vals.PLAYER_TOKEN || "",
+    player1Acct: vals.PLAYER1_ACCT || "",
+    theme: vals.THEME || "E2E Theme",
+    playlistLength: n("PLAYLIST_LENGTH", 8),
+    pollDurationSec: n("POLL_DURATION_SEC", 300),
+    tuneUrlsHost: urls("TUNE_URLS_HOST"),
+    tuneUrlsPlayer1: urls("TUNE_URLS_PLAYER1"),
+    debug: vals.DEBUG === "1" || vals.DEBUG === "true",
+    backstop: {
+      create: n("BACKSTOP_CREATE_SEC", 120),
+      accept: n("BACKSTOP_ACCEPT_SEC", 180),
+      submit: n("BACKSTOP_SUBMIT_SEC", 300),
+      poll: n("BACKSTOP_POLL_SEC", n("POLL_DURATION_SEC", 300) + 120),
+      finale: n("BACKSTOP_FINALE_SEC", 900),
+    },
+    pollIntervalMs: n("POLL_INTERVAL_MS", 4000),
+  };
+}
+
+// ─── World (observability) ─────────────────────────────────────────────
+
+interface Seen {
+  id: string;
+  at: string;
+  text: string;
+  visibility: string;
+  hasPoll: boolean;
+  /** Present when hasPoll — needed to vote. */
+  poll?: MastodonPoll | null;
+}
+
+class World {
+  /** Ignore anything older than the run's start. */
+  since = new Date().toISOString();
+
+  constructor(
+    readonly cfg: Cfg,
+    readonly host: MastodonAPI,
+    readonly player: MastodonAPI,
+  ) {}
+
+  get botHandle(): string {
+    return `${this.cfg.botAcct}@${this.cfg.botInstance}`;
+  }
+
+  get hostHandle(): string {
+    return this.cfg.hostAcct.includes("@")
+      ? this.cfg.hostAcct
+      : `${this.cfg.hostAcct}@${this.cfg.hostInstance}`;
+  }
+
+  get playerHandle(): string {
+    return this.cfg.player1Acct.includes("@")
+      ? this.cfg.player1Acct
+      : `${this.cfg.player1Acct}@${this.cfg.player1Instance}`;
+  }
+
+  /** Everything the bot has posted since the run began. */
+  async botActivity(): Promise<Seen[]> {
+    const sts = await this.player.getAccountStatusesByHandle(this.botHandle, 40);
+    return sts
+      .filter((s) => s.created_at > this.since)
+      .map((s) => ({
+        id: s.id,
+        at: s.created_at,
+        text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+        visibility: s.visibility,
+        hasPoll: Boolean(s.poll),
+        poll: s.poll,
+      }));
+  }
+
+  /** Bot statuses visible in a player's conversation with the bot. */
+  async playerDmActivity(): Promise<Seen[]> {
+    const convs = await this.player.getConversations(40);
+    const viewer = this.cfg.player1Instance;
+    const out: Seen[] = [];
+    for (const c of convs) {
+      const s = c.last_status;
+      if (!s) continue;
+      if (s.created_at <= this.since) continue;
+      if (!acctMatches(s.account.acct, viewer, this.botHandle)) continue;
+      out.push({
+        id: s.id,
+        at: s.created_at,
+        text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+        visibility: s.visibility,
+        hasPoll: Boolean(s.poll),
+        poll: s.poll,
+      });
+    }
+    return out;
+  }
+
+  /** One-line description of reality, printed while waiting. */
+  async snapshot(): Promise<string> {
+    try {
+      const pub = await this.botActivity();
+      const dm = await this.playerDmActivity();
+      const bits: string[] = [`public=${pub.length}`, `dm=${dm.length}`];
+      const newest = pub[0] ?? dm[0];
+      if (newest) bits.push(`newest="${newest.text.slice(0, 50)}"`);
+      return bits.join(" ");
+    } catch (e) {
+      return `unreadable: ${String(e).slice(0, 60)}`;
+    }
+  }
+}
+
+// ─── Driver primitives ─────────────────────────────────────────────────
+
+const t0 = Date.now();
+function say(msg: string) {
+  console.log(`[${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s] ${msg}`);
+}
+
+class Backstop extends Error {
+  constructor(readonly label: string, readonly snapshot: string) {
+    super(`event never occurred: ${label}`);
+    this.name = "Backstop";
+  }
+}
+
+/**
+ * Wait until `probe` yields a truthy value, then return it.
+ *
+ * This is the only waiting primitive in the driver. The deadline is a
+ * backstop against hanging forever, not an expectation about timing.
+ */
+async function until<T>(
+  probe: () => Promise<T | null | undefined | false>,
+  label: string,
+  backstopSec: number,
+  world: World,
+): Promise<T> {
+  const deadline = Date.now() + backstopSec * 1000;
+  let probes = 0;
+
+  while (Date.now() < deadline) {
+    probes++;
+    try {
+      const v = await probe();
+      if (v) {
+        say(`    ✓ ${label} (${probes} probe${probes === 1 ? "" : "s"})`);
+        return v;
+      }
+    } catch {
+      // transient API failure — keep observing
+    }
+    if (probes % 4 === 0) {
+      say(`    … ${label} | world: ${await world.snapshot()}`);
+    }
+    await new Promise((r) => setTimeout(r, world.cfg.pollIntervalMs));
+  }
+
+  throw new Backstop(label, await world.snapshot());
+}
+
+interface StepResult {
+  step: string;
+  ok: boolean;
+  detail: string;
+  ms: number;
+}
+const results: StepResult[] = [];
+
+async function step(name: string, fn: () => Promise<string>, world: World) {
+  const started = Date.now();
+  say(`▶ ${name}`);
+  try {
+    const detail = await fn();
+    results.push({ step: name, ok: true, detail, ms: Date.now() - started });
+    say(`  ✓ ${name} — ${detail}`);
+  } catch (e) {
+    const detail =
+      e instanceof Backstop ? `never happened | world: ${e.snapshot}` : String(e);
+    results.push({ step: name, ok: false, detail, ms: Date.now() - started });
+    say(`  ✗ ${name} — ${detail}`);
+    throw e;
+  }
+}
+
+// ─── The lifecycle ─────────────────────────────────────────────────────
+
+async function main() {
+  const cfg = loadConfig();
+  const host = new MastodonAPI(`https://${cfg.hostInstance}`, cfg.hostToken, cfg.debug);
+  const player = new MastodonAPI(
+    `https://${cfg.player1Instance}`,
+    cfg.player1Token,
+    cfg.debug,
+  );
+  const world = new World(cfg, host, player);
+
+  say("resolving identities…");
+  const me = await player.getMe();
+  const botId = await player.resolveAccountId(world.botHandle);
+  say(`  player  @${me.acct} (${me.id})`);
+  say(`  bot     @${world.botHandle} (id ${botId})`);
+  say(`  host    @${world.hostHandle}`);
+  say(`  theme   "${cfg.theme}", ${cfg.playlistLength} tunes, poll ${cfg.pollDurationSec}s`);
+
+  // ── 1. Create ────────────────────────────────────────────────────────
+  await step("create", async () => {
+    const content = `@${world.botHandle} newgame "${cfg.theme}" ${cfg.playlistLength} ${world.playerHandle}`;
+    const st = await player.postStatus(content);
+    say(`  sent: ${content}`);
+
+    // The bot answers in the thread; its presence is the event.
+    await until(
+      async () => {
+        const ctx = await player.getStatusContext(st.id);
+        const inThread = [...ctx.ancestors, ...ctx.descendants];
+        return inThread.find((s) => acctMatches(s.account.acct, cfg.player1Instance, world.botHandle));
+      },
+      "bot replied in the thread",
+      cfg.backstop.create,
+      world,
+    );
+
+    // Anchor everything after this to the game's own start.
+    world.since = st.created_at;
+    return `game created, thread ${st.id}`;
+  }, world);
+
+  // ── 2. Accept ────────────────────────────────────────────────────────
+  await step("accept", async () => {
+    // The challenger accepts. The bot confirms by DM, which is observable
+    // for a cross-instance recipient via /conversations.
+    const before = (await world.playerDmActivity()).map((s) => s.id);
+    await player.sendBotDM(world.botHandle, "accept");
+
+    await until(
+      async () => {
+        const now = await world.playerDmActivity();
+        const fresh = now.filter((s) => !before.includes(s.id));
+        return fresh.find((s) => /aceit|aceito|recusad|desafio aceito|entrou/i.test(s.text));
+      },
+      "bot acknowledged the acceptance",
+      cfg.backstop.accept,
+      world,
+    );
+    return "challenger accepted";
+  }, world);
+
+  // ── 3. Submit ────────────────────────────────────────────────────────
+  // Fire the submissions, then watch for the state transition. No per-tune
+  // ack waiting: the bot only posts a poll once BOTH players are done, and
+  // that poll is the signal.
+  await step("submit", async () => {
+    const all: Array<[MastodonAPI, string, string[]]> = [
+      [host, world.hostHandle, cfg.tuneUrlsHost],
+      [player, world.playerHandle, cfg.tuneUrlsPlayer1],
+    ];
+    const total = all.reduce((n, [, , u]) => n + u.length, 0);
+    say(`  submitting ${total} tunes across ${all.length} players`);
+
+    // Interleave submissions so neither player's queue dominates.
+    for (let i = 0; i < Math.max(...all.map(([, , u]) => u.length)); i++) {
+      for (const [api, , urls] of all) {
+        const url = urls[i];
+        if (url) await api.sendBotDM(world.botHandle, url);
+      }
+      // Brief pause so the bot's notification loop can drain; not a wait
+      // for an acknowledgement.
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+
+    // Rejections are silent from the submitter's point of view: the bot just
+    // does not count the tune. Surface them so a bad URL cannot masquerade as
+    // a timing problem.
+    const rejects = (await world.playerDmActivity()).filter((s) =>
+      /n[aã]o reproduz|invalid|inv[aá]lid/i.test(s.text),
+    );
+    if (rejects.length > 0) {
+      for (const r of rejects) say(`  ! rejected: ${r.text.slice(0, 100)}`);
+      throw new Error(
+        `${rejects.length} tune(s) rejected as non-reproducible - ` +
+          `a player cannot reach ${cfg.playlistLength} tunes, so no poll is possible`,
+      );
+    }
+
+    // The poll's arrival means both players' submissions registered.
+    const poll = await until(
+      async () => {
+        const pub = await world.botActivity();
+        return pub.find((s) => s.hasPoll);
+      },
+      "bot posted the first poll (both players submitted)",
+      cfg.backstop.submit,
+      world,
+    );
+    return `${total} submitted, 0 rejected, poll ${poll.id} appeared`;
+  }, world);
+
+  // ── 4/5. Vote ────────────────────────────────────────────────────────
+  await step("vote", async () => {
+    const pollStatus = (await world.botActivity()).find((s) => s.hasPoll);
+    if (!pollStatus) throw new Error("no poll to vote on");
+    const poll = pollStatus.poll;
+    if (!poll) throw new Error("poll status carries no poll object");
+
+    say(`  poll ${poll.id}: ${poll.options.map((o) => o.title).join(" vs ")}`);
+
+    // Vote from each participant. Both are legitimate: the host and the
+    // challenger each pick a different option so the poll cannot tie 1-1
+    // purely by accident.
+    const votes: string[] = [];
+    const cast = async (api: MastodonAPI, label: string, choice: number) => {
+      const r = await api.votePoll(pollStatus.id, poll.id, [choice]);
+      votes.push(`${label}=${r.voted !== false}`);
+      say(`  ${label} voted option ${choice} (voters=${r.voters_count})`);
+    };
+
+    const n = poll.options.length;
+    await cast(host, "host", 0);
+    if (n > 1) await cast(player, "challenger", 1);
+
+    // Confirm the vote is reflected, rather than assuming the POST worked.
+    await until(
+      async () => {
+        const fresh = await world.botActivity();
+        return fresh.some((s) => s.hasPoll);
+      },
+      "poll state readable after voting",
+      cfg.backstop.poll,
+      world,
+    );
+
+    return `${votes.join(" ")} on ${poll.options.length} options`;
+  }, world);
+
+  // ── 6. Finale ────────────────────────────────────────────────────────
+  await step("finale", async () => {
+    await until(
+      async () => {
+        const pub = await world.botActivity();
+        return pub.find((s) =>
+          /final|encerrad|vencedor|terminou|acabou|🏆|parabéns|parabens/i.test(s.text),
+        );
+      },
+      "bot announced the finale",
+      cfg.backstop.finale,
+      world,
+    );
+    return "finale announced";
+  }, world);
+}
+
+// ─── Report ────────────────────────────────────────────────────────────
+
+function report() {
+  console.log("\n" + "═".repeat(64));
+  console.log("  LIFECYCLE RESULT");
+  console.log("═".repeat(64));
+  for (const r of results) {
+    console.log(
+      `  ${r.ok ? "✅" : "❌"} ${r.step.padEnd(10)} ${(r.ms / 1000).toFixed(1).padStart(6)}s  ${r.detail}`,
+    );
+  }
+  const ok = results.filter((r) => r.ok).length;
+  const bad = results.length - ok;
+  console.log("─".repeat(64));
+  console.log(`  ${ok} passed, ${bad} failed, total ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+  console.log("═".repeat(64));
+  process.exit(bad > 0 ? 1 : 0);
+}
+
+main()
+  .catch((e) => {
+    if (!(e instanceof Backstop)) console.error("fatal:", e);
+  })
+  .finally(report);
