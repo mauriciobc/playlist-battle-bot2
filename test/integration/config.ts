@@ -62,6 +62,8 @@ export interface TestConfig {
   tuneUrlsPlayer2: string[];
   waitTimeoutSec: number;
   pollWaitSec: number;
+  pollCheckIntervalSec: number;
+  finaleTimeoutSec: number;
   debug: boolean;
 }
 
@@ -103,6 +105,18 @@ const TEST_TUNES_P2 = [
   "https://www.youtube.com/watch?v=hT_nvWreIhg",
 ];
 
+/**
+ * Parse a comma-separated URL list from the environment, falling back to
+ * `fallback` when unset or empty.
+ *
+ * The obvious `list.filter(Boolean) || fallback` does NOT work: an empty
+ * array is truthy, so the fallback never fired and the test submitted 0 tunes.
+ */
+function envUrls(name: string, fallback: string[], length: number): string[] {
+  const raw = (process.env[name] || "").split(",").filter(Boolean);
+  return (raw.length > 0 ? raw : fallback).slice(0, length);
+}
+
 export function loadConfig(): TestConfig {
   const p2Token = process.env.PLAYER2_TOKEN || null;
   const p2Acct = process.env.PLAYER2_ACCT || null;
@@ -124,10 +138,8 @@ export function loadConfig(): TestConfig {
     theme: opt("GAME_THEME", "integration test"),
     playlistLength: length,
     pollDurationSec: optInt("POLL_DURATION_SEC", 300),
-    tuneUrlsPlayer1: (process.env.TUNE_URLS_PLAYER1 || "").split(",").filter(Boolean).slice(0, length)
-      || TEST_TUNES_P1.slice(0, length),
-    tuneUrlsPlayer2: (process.env.TUNE_URLS_PLAYER2 || "").split(",").filter(Boolean).slice(0, length)
-      || TEST_TUNES_P2.slice(0, length),
+    tuneUrlsPlayer1: envUrls("TUNE_URLS_PLAYER1", TEST_TUNES_P1, length),
+    tuneUrlsPlayer2: envUrls("TUNE_URLS_PLAYER2", TEST_TUNES_P2, length),
     waitTimeoutSec: optInt("WAIT_TIMEOUT_SEC", 420),
     pollWaitSec: optInt("POLL_WAIT_SEC", 305),
     pollCheckIntervalSec: optInt("POLL_CHECK_INTERVAL_SEC", 5),
