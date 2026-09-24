@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig, readLogSettings, type BotConfig } from "../src/config.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openDatabase, migrate } from "../src/db/index.js";
 
 const validEnv: NodeJS.ProcessEnv = {
   MASTODON_URL: "https://mastodon.example",
@@ -100,10 +104,84 @@ describe("loadConfig", () => {
   });
 
   it("enforces Mastodon poll duration bounds (5 min – 7 days)", () => {
-    expect(() => cfg({ POLL_DURATION_SEC: "29" })).toThrow(/POLL_DURATION_SEC/);
+    expect(() => cfg({ POLL_DURATION_SEC: "299" })).toThrow(/POLL_DURATION_SEC/);
     expect(() => cfg({ POLL_DURATION_SEC: "604801" })).toThrow(/POLL_DURATION_SEC/);
-    expect(() => cfg({ POLL_DURATION_SEC: "30" })).not.toThrow();
+    expect(() => cfg({ POLL_DURATION_SEC: "300" })).not.toThrow();
     expect(() => cfg({ POLL_DURATION_SEC: "604800" })).not.toThrow();
+  });
+
+  it("keeps the DB poll_duration_sec constraint in sync with the config minimum", () => {
+    // Mastodon rejects polls shorter than 5 minutes, so both the config layer
+    // and the SQLite CHECK must agree on 300. If either drifts, game creation
+    // fails at runtime with an opaque "CHECK constraint failed" error.
+    const dir = mkdtempSync(join(tmpdir(), "pb-poll-floor-"));
+    try {
+      const db = openDatabase(join(dir, "test.db"));
+      migrate(db);
+      const floor = cfg({ POLL_DURATION_SEC: "300" });
+      const insert = db.prepare(
+        `INSERT INTO games
+           (id, status, theme, playlist_length, host_account_id, poll_duration_sec, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      expect(() => insert.run(
+        "g-ok", "CREATED", "theme", 8, "host", floor.pollDurationSec,
+        "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+      )).not.toThrow();
+      expect(() => insert.run(
+        "g-bad", "CREATED", "theme", 8, "host", floor.pollDurationSec - 1,
+        "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+      )).toThrow(/CHECK constraint failed/);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces Mastodon's 300s poll floor even in test mode", () => {
+    // A test mode must NOT be able to create a poll Mastodon will reject.
+    expect(() => cfg({ TEST_MODE: "1", POLL_DURATION_SEC: "30" })).toThrow(/POLL_DURATION_SEC/);
+  });
+
+  it("test mode compresses early-close so rounds resolve without waiting for poll expiry", () => {
+    const normal = cfg({ TEST_MODE: undefined, EARLY_CLOSE_ENABLED: undefined });
+    const fast = cfg({ TEST_MODE: "1" });
+
+    expect(normal.earlyCloseEnabled).toBe(true);
+    expect(normal.earlyCloseMinAgeSec).toBe(300);
+    expect(normal.earlyCloseStagnationSec).toBe(300);
+
+    // Enabled by default, and closes as soon as the tally stops moving.
+    expect(fast.earlyCloseEnabled).toBe(true);
+    expect(fast.earlyCloseMinAgeSec).toBe(0);
+    expect(fast.earlyCloseStagnationSec).toBe(0);
+  });
+
+  it("test mode exposes short loop intervals for fast E2E runs", () => {
+    const fast = cfg({ TEST_MODE: "1" });
+    expect(fast.notificationIntervalSec).toBeLessThanOrEqual(5);
+    expect(fast.schedulerIntervalSec).toBeLessThanOrEqual(15);
+    expect(fast.recoveryIntervalSec).toBeLessThanOrEqual(60);
+  });
+
+  it("turns second-based intervals into millisecond timers the runtime can use", () => {
+    // index.ts schedules with setInterval(ms); the config speaks seconds.
+    const fast = cfg({ TEST_MODE: "1" });
+    expect(fast.notificationIntervalSec * 1000).toBe(fast.notificationIntervalMs);
+    expect(fast.schedulerIntervalSec * 1000).toBe(fast.schedulerIntervalMs);
+    expect(fast.recoveryIntervalSec * 1000).toBe(fast.recoveryIntervalMs);
+  });
+
+  it("keeps production loop intervals when test mode is off", () => {
+    const normal = cfg({ TEST_MODE: undefined });
+    expect(normal.notificationIntervalSec).toBe(15);
+    expect(normal.schedulerIntervalSec).toBe(60);
+    expect(normal.recoveryIntervalSec).toBe(300);
+  });
+
+  it("allows explicit interval overrides to win over test mode defaults", () => {
+    const fast = cfg({ TEST_MODE: "1", NOTIFICATION_INTERVAL_SEC: "2" });
+    expect(fast.notificationIntervalSec).toBe(2);
   });
 
   it("enforces positive acceptance and submission windows", () => {

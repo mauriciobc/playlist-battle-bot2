@@ -14,11 +14,12 @@
  * Optional:
  *   GAME_THEME          – override default theme (default: "integration test")
  *   PLAYLIST_LENGTH     – override playlist length (default: 8, min 8)
- *   POLL_DURATION_SEC   – override poll duration (default: 60 for fast tests)
+ *   POLL_DURATION_SEC   – poll duration in seconds (default 300; Mastodon minimum)
  *   TUNE_URLS_PLAYER1   – comma-separated YouTube URLs for player 1 (otherwise uses test stubs)
  *   TUNE_URLS_PLAYER2   – comma-separated YouTube URLs for player 2
- *   WAIT_TIMEOUT_SEC    – max seconds to wait for bot response (default: 120)
- *   POLL_WAIT_SEC       – seconds to wait after voting before checking result (default: 65)
+ *   WAIT_TIMEOUT_SEC    – max seconds to wait for bot response (default: 420)
+ *   POLL_CHECK_INTERVAL_SEC – seconds between API polls while waiting (default: 5)
+ *   FINALE_TIMEOUT_SEC – max seconds to wait for the finale (default: 1800)
  *   DEBUG               – set to "1" for verbose logging
  */
 
@@ -122,15 +123,15 @@ export function loadConfig(): TestConfig {
     player2Acct: p2Acct,
     theme: opt("GAME_THEME", "integration test"),
     playlistLength: length,
-    pollDurationSec: optInt("POLL_DURATION_SEC", 60),
+    pollDurationSec: optInt("POLL_DURATION_SEC", 300),
     tuneUrlsPlayer1: (process.env.TUNE_URLS_PLAYER1 || "").split(",").filter(Boolean).slice(0, length)
       || TEST_TUNES_P1.slice(0, length),
     tuneUrlsPlayer2: (process.env.TUNE_URLS_PLAYER2 || "").split(",").filter(Boolean).slice(0, length)
       || TEST_TUNES_P2.slice(0, length),
-    waitTimeoutSec: optInt("WAIT_TIMEOUT_SEC", 180),
-    pollWaitSec: optInt("POLL_WAIT_SEC", 65),
+    waitTimeoutSec: optInt("WAIT_TIMEOUT_SEC", 420),
+    pollWaitSec: optInt("POLL_WAIT_SEC", 305),
     pollCheckIntervalSec: optInt("POLL_CHECK_INTERVAL_SEC", 5),
-    finaleTimeoutSec: optInt("FINALE_TIMEOUT_SEC", 900),
+    finaleTimeoutSec: optInt("FINALE_TIMEOUT_SEC", 1800),
     debug: opt("DEBUG", "") === "1",
   };
 }

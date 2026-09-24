@@ -2,8 +2,22 @@ import { z } from "zod";
 import type { PlaylistPrivacy } from "./youtube/ytmusic.js";
 
 /** Mastodon allows polls from 5 minutes to 7 days. */
-const POLL_MIN_SEC = 30;
+const POLL_MIN_SEC = 300;
 const POLL_MAX_SEC = 604800;
+
+/** Production loop cadence (seconds). */
+const LOOP_NOTIFICATION_SEC = 15;
+const LOOP_SCHEDULER_SEC = 60;
+const LOOP_RECOVERY_SEC = 300;
+
+/**
+ * Test-mode loop cadence (seconds). The poll itself still has to be >= 300s
+ * because Mastodon rejects shorter polls; rounds are shortened by resolving
+ * stagnant polls early, not by asking Mastodon for an impossible poll.
+ */
+const TEST_LOOP_NOTIFICATION_SEC = 5;
+const TEST_LOOP_SCHEDULER_SEC = 10;
+const TEST_LOOP_RECOVERY_SEC = 60;
 
 const intFromEnv = (min: number, max?: number) =>
   z
@@ -88,6 +102,16 @@ const envSchema = z.object({
   YT_AUTH_USER: intFromEnv(0).default(0),
   YT_PLAYLIST_PRIVACY: z.enum(["PUBLIC", "PRIVATE", "UNLISTED"]).default("PUBLIC"),
 
+  /**
+   * Compresses loop cadence and closes stagnant polls immediately so an
+   * end-to-end game finishes in minutes. Never changes the poll floor.
+   */
+  TEST_MODE: envFlag,
+
+  NOTIFICATION_INTERVAL_SEC: intFromEnv(1).optional(),
+  SCHEDULER_INTERVAL_SEC: intFromEnv(1).optional(),
+  RECOVERY_INTERVAL_SEC: intFromEnv(1).optional(),
+
   DB_PATH: z.string().min(1).default("./data/bot.db"),
   // Validated so a typo fails the boot loudly; readLogSettings() reads the same
   // values tolerantly, before validation, for the build-identity line.
@@ -111,6 +135,15 @@ export type BotConfig = {
   earlyCloseMinAgeSec: number;
   earlyCloseStagnationSec: number;
   autoDeleteWindowHours: number;
+  testMode: boolean;
+  /** Loop cadences in seconds (config-facing). */
+  notificationIntervalSec: number;
+  schedulerIntervalSec: number;
+  recoveryIntervalSec: number;
+  /** Same cadences in milliseconds, for setInterval. */
+  notificationIntervalMs: number;
+  schedulerIntervalMs: number;
+  recoveryIntervalMs: number;
   /** Bot-account YT Music cookie; null → anonymous queue links only. */
   ytCookie: string | null;
   ytAuthUser: number;
@@ -150,6 +183,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const autoDeleteUnsafe =
     e.AUTO_DELETE_WINDOW_HOURS > 0 && windowSec < worstCaseGameSec;
 
+  const notificationSec =
+    e.NOTIFICATION_INTERVAL_SEC ??
+    (e.TEST_MODE ? TEST_LOOP_NOTIFICATION_SEC : LOOP_NOTIFICATION_SEC);
+  const schedulerSec =
+    e.SCHEDULER_INTERVAL_SEC ??
+    (e.TEST_MODE ? TEST_LOOP_SCHEDULER_SEC : LOOP_SCHEDULER_SEC);
+  const recoverySec =
+    e.RECOVERY_INTERVAL_SEC ??
+    (e.TEST_MODE ? TEST_LOOP_RECOVERY_SEC : LOOP_RECOVERY_SEC);
+
   return {
     mastodonUrl: e.MASTODON_URL.replace(/\/+$/, ""),
     mastodonToken: e.MASTODON_TOKEN,
@@ -160,10 +203,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     creationCooldownSec: e.CREATION_COOLDOWN_SEC,
     maxGamesPerPlayer: e.MAX_GAMES_PER_PLAYER,
     replacementGraceMin: e.REPLACEMENT_GRACE_MIN,
+    // EARLY_CLOSE_ENABLED stays operator-controlled even in test mode; only the
+    // thresholds collapse, so a round resolves the moment its tally stops moving
+    // instead of waiting out Mastodon's mandatory 5-minute poll.
     earlyCloseEnabled: e.EARLY_CLOSE_ENABLED,
-    earlyCloseMinAgeSec: e.EARLY_CLOSE_MIN_AGE_SEC,
-    earlyCloseStagnationSec: e.EARLY_CLOSE_STAGNATION_SEC,
+    earlyCloseMinAgeSec: e.TEST_MODE ? 0 : e.EARLY_CLOSE_MIN_AGE_SEC,
+    earlyCloseStagnationSec: e.TEST_MODE ? 0 : e.EARLY_CLOSE_STAGNATION_SEC,
     autoDeleteWindowHours: e.AUTO_DELETE_WINDOW_HOURS,
+    testMode: e.TEST_MODE,
+    notificationIntervalSec: notificationSec,
+    schedulerIntervalSec: schedulerSec,
+    recoveryIntervalSec: recoverySec,
+    notificationIntervalMs: notificationSec * 1000,
+    schedulerIntervalMs: schedulerSec * 1000,
+    recoveryIntervalMs: recoverySec * 1000,
     ytCookie: e.YT_COOKIE?.trim() ? e.YT_COOKIE.trim() : null,
     ytAuthUser: e.YT_AUTH_USER,
     ytPlaylistPrivacy: e.YT_PLAYLIST_PRIVACY,
