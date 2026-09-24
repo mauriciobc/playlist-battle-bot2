@@ -208,13 +208,37 @@ export class MastodonClient {
           const retryAfter = Number(res.headers.get("Retry-After") ?? "60");
           const resetAt = this.rateLimit?.resetAt ??
             (Number.isFinite(retryAfter) ? Math.floor(Date.now() / 1000) + retryAfter : Math.floor(Date.now() / 1000) + 60);
+          const resetsAt = new Date(resetAt * 1000).toISOString();
+          if (attempt < maxRetries) {
+            // Wait out the true window before the one allowed retry. A
+            // Retry-After guess could be 1s for a window that resets in
+            // minutes, spending another request against that same window.
+            const delayMs = Math.max(0, resetAt * 1000 - Date.now());
+            this.log?.warn(
+              {
+                method,
+                path,
+                attempt: attempt + 1,
+                limit: this.rateLimit?.limit ?? null,
+                remaining: this.rateLimit?.remaining ?? null,
+                reason: "rate_limit",
+                delayMs,
+                resetsAt,
+              },
+              "mastodon request retry",
+            );
+            await this.sleep(delayMs);
+            attempt += 1;
+            bypassRateLimit = true;
+            continue;
+          }
           this.log?.warn(
             {
               method,
               path,
               limit: this.rateLimit?.limit ?? null,
               remaining: this.rateLimit?.remaining ?? null,
-              resetsAt: new Date(resetAt * 1000).toISOString(),
+              resetsAt,
               retryAfterHeader: res.headers.get("Retry-After"),
               resetHeader: res.headers.get("X-RateLimit-Reset"),
             },
