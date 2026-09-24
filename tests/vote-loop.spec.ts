@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planVotes, alreadyVotedOn, shouldStopVoting, castPlan } from "../test/integration/vote-planner.js";
+import { alreadyVotedOn, castPlan, planVotes, shouldStopVoting, withVoter } from "../test/integration/vote-planner.js";
 
 /**
  * The driver voted once, in the first round, and then left the rest of the
@@ -69,7 +69,20 @@ describe("voting every round", () => {
     ).toBe(false);
   });
 
-  it("casts three votes: two players on option 0, a spectator on option 1", () => {
+  it("without a spectator, two players vote and the round is a tie by rule", () => {
+    // The game does not need three voters. ROUND_QUORUM makes two votes a
+    // tie, and a tie is a valid outcome, not a failure - the game continues.
+    const votes = castPlan(2, 0);
+    expect(votes).toEqual([
+      { label: "host", choice: 0 },
+      { label: "challenger", choice: 0 },
+    ]);
+    const tally = new Map<number, number>();
+    for (const v of votes) tally.set(v.choice, (tally.get(v.choice) ?? 0) + 1);
+    expect([...tally.values()]).toEqual([2]); // one option, two votes
+  });
+
+  it("with a spectator, the round becomes 2-1 so the bot must compare", () => {
     // ROUND_QUORUM is 3 (src/game/scoring.ts:29). With only the two players,
     // totalVotes is 2 and resolveRoundScore returns winnerAccountId: null -
     // the bot was reading the rule correctly, not failing. The bot cannot be
@@ -78,7 +91,7 @@ describe("voting every round", () => {
     // The spectator backs the OTHER option, so the round resolves 2-1 and the
     // bot has to compare. A unanimous tally would pass without the comparison
     // ever running.
-    const votes = castPlan(2, 0);
+    const votes = withVoter(castPlan(2, 0), 2);
     expect(votes).toEqual([
       { label: "host", choice: 0 },
       { label: "challenger", choice: 0 },
@@ -89,7 +102,7 @@ describe("voting every round", () => {
   it("three votes with a unique leader is the shape that produces a winner", () => {
     // Guard the reason the third voter exists, so the test fails if the
     // quorum rule changes and the harness silently ties again.
-    const votes = castPlan(2, 0);
+    const votes = withVoter(castPlan(2, 0), 2);
     const tally = new Map<number, number>();
     for (const v of votes) tally.set(v.choice, (tally.get(v.choice) ?? 0) + 1);
     const sorted = [...tally.values()].sort((a, b) => b - a);
