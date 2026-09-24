@@ -54,12 +54,15 @@ export async function pollNotifications(deps: HandlerDeps): Promise<void> {
 
     for (const n of sorted) {
       if (deferred.has(n.id)) {
+        // Do NOT advance past this one. The cursor is what the next poll
+        // asks for, so advancing here would drop the notification for good
+        // and the deferred retry would never happen. Stop this tick instead
+        // and let the next one see it again, once the window has reset.
         deps.logger?.debug(
           { notificationId: n.id },
-          "notification deferred until its rate limit resets",
+          "notification deferred until its rate limit resets; ending tick",
         );
-        current = advance(n.id, current);
-        continue;
+        break;
       }
       await processNotification(n, deps);
       current = advance(n.id, current);
