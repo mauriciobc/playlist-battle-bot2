@@ -58,6 +58,7 @@ export interface TestConfig {
   theme: string;
   playlistLength: number;
   pollDurationSec: number;
+  tuneUrlsHost: string[];
   tuneUrlsPlayer1: string[];
   tuneUrlsPlayer2: string[];
   waitTimeoutSec: number;
@@ -138,6 +139,7 @@ export function loadConfig(): TestConfig {
     theme: opt("GAME_THEME", "integration test"),
     playlistLength: length,
     pollDurationSec: optInt("POLL_DURATION_SEC", 300),
+    tuneUrlsHost: envUrls("TUNE_URLS_HOST", TEST_TUNES_P2, length),
     tuneUrlsPlayer1: envUrls("TUNE_URLS_PLAYER1", TEST_TUNES_P1, length),
     tuneUrlsPlayer2: envUrls("TUNE_URLS_PLAYER2", TEST_TUNES_P2, length),
     waitTimeoutSec: optInt("WAIT_TIMEOUT_SEC", 420),

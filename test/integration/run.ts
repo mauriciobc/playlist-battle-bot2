@@ -240,6 +240,11 @@ async function phaseSubmit(state: TestState): Promise<void> {
     return { sent, replies };
   }
 
+  // Submit HOST tunes. A round only starts when BOTH players have submitted,
+  // so skipping the host leaves the game stuck in COLLECTING forever.
+  const host = await submitTunes(state.hostApi, state.hostAcct, state.tuneUrlsHost);
+  console.log(`  HOST: sent ${host.sent}, acknowledged ${host.replies}`);
+
   // Submit player 1 tunes
   const p1 = await submitTunes(state.player1Api, state.player1Acct, state.tuneUrlsPlayer1);
   console.log(`  P1: sent ${p1.sent}, acknowledged ${p1.replies}`);
@@ -251,10 +256,11 @@ async function phaseSubmit(state: TestState): Promise<void> {
     console.log(`  P2: sent ${p2.sent}, acknowledged ${p2.replies}`);
   }
 
+  const hostOk = host.replies > 0;
   const p1Ok = p1.replies > 0;
   const p2Ok = !state.player2Acct || p2.replies > 0;
-  const passed = p1Ok && p2Ok;
-  const detail = `P1: ${p1.replies}/${p1.sent} ack'd${state.player2Acct ? `, P2: ${p2.replies}/${p2.sent} ack'd` : ""}`;
+  const passed = hostOk && p1Ok && p2Ok;
+  const detail = `HOST: ${host.replies}/${host.sent}, P1: ${p1.replies}/${p1.sent}${state.player2Acct ? `, P2: ${p2.replies}/${p2.sent}` : ""} ack'd`;
   check("submit", passed, detail, start, state);
 }
 
