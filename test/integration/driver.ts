@@ -130,6 +130,20 @@ class World {
   /** Ignore anything older than the run's start. */
   since = new Date().toISOString();
 
+  /**
+   * Theme of the game this run created.
+   *
+   * The bot drains a backlog of old newgame commands on boot and announces
+   * those games too, so a timeline scan can find games this run never
+   * created - and then report success for somebody else's work. Every status
+   * the bot emits about a game repeats that game's theme, so the theme is
+   * the anchor that keeps this run's observations scoped to this run.
+   *
+   * Status ids are NOT usable for this: the poll and every round result are
+   * new statuses the bot creates, not statuses this run posted.
+   */
+  gameTheme: string | null = null;
+
   constructor(
     readonly cfg: Cfg,
     readonly host: MastodonAPI,
@@ -157,6 +171,7 @@ class World {
     const sts = await this.player.getAccountStatusesByHandle(this.botHandle, 40);
     return sts
       .filter((s) => s.created_at > this.since)
+      .filter((s) => !this.gameTheme || s.text.includes(this.gameTheme))
       .map((s) => ({
         id: s.id,
         at: s.created_at,
@@ -352,8 +367,12 @@ async function main() {
     );
     say(`  bot: ${reply.content.replace(/<[^>]+>/g, " ").trim().slice(0, 100)}`);
 
-    // Anchor everything after this to the game's own start.
+    // Anchor everything after this to the game's own start, and take
+    // ownership of the two statuses this run produced. Later steps observe
+    // only these, so a backlog of other games cannot be mistaken for this
+    // run's work.
     world.since = st.created_at;
+    world.gameTheme = cfg.theme;
     return `game created, thread ${st.id}`;
   }, world);
 
