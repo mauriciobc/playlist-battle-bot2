@@ -157,6 +157,7 @@ async function main(): Promise<void> {
       instance: instanceDomain,
       pollDurationSec: config.pollDurationSec,
       earlyClose: config.earlyCloseEnabled,
+      runMode: config.runMode,
       testMode: config.testMode,
       earlyCloseMinAgeSec: config.earlyCloseMinAgeSec,
       earlyCloseStagnationSec: config.earlyCloseStagnationSec,

@@ -19,6 +19,18 @@ const TEST_LOOP_NOTIFICATION_SEC = 5;
 const TEST_LOOP_SCHEDULER_SEC = 10;
 const TEST_LOOP_RECOVERY_SEC = 60;
 
+/**
+ * E2E cadence: fast enough to keep a test suite moving, slow enough that an
+ * external client can read a poll and cast a vote before the round is
+ * resolved underneath it.
+ */
+const E2E_LOOP_NOTIFICATION_SEC = 5;
+const E2E_LOOP_SCHEDULER_SEC = 10;
+const E2E_LOOP_RECOVERY_SEC = 30;
+
+/** Operating mode. See RUN_MODE. */
+export type RunMode = "production" | "e2e" | "test";
+
 const intFromEnv = (min: number, max?: number) =>
   z
     .string()
@@ -103,8 +115,28 @@ const envSchema = z.object({
   YT_PLAYLIST_PRIVACY: z.enum(["PUBLIC", "PRIVATE", "UNLISTED"]).default("PUBLIC"),
 
   /**
+   * Operating mode.
+   *
+   * - "production": full cadence, poll closes on its own terms.
+   * - "e2e":        fast loops, but a poll stays open long enough for a real
+   *                 client to read it and vote. This is the mode the E2E
+   *                 driver needs; "test" is not enough because it collapses
+   *                 the early-close thresholds to zero.
+   * - "test":       everything collapses to zero, so a whole game finishes in
+   *                 seconds. Fine for the bot's own unit tests, useless for
+   *                 driving the real Mastodon API from outside.
+   *
+   * The poll floor stays 300s in every mode: Mastodon rejects anything
+   * shorter. Modes control loop cadence and early close, never the poll.
+   */
+  RUN_MODE: z.enum(["production", "e2e", "test"]).optional(),
+
+  /**
    * Compresses loop cadence and closes stagnant polls immediately so an
    * end-to-end game finishes in minutes. Never changes the poll floor.
+   *
+   * @deprecated Use RUN_MODE. TEST_MODE=1 maps to RUN_MODE="test" and keeps
+   * its zeroed thresholds, so it is retained only for existing deployments.
    */
   TEST_MODE: envFlag,
 
@@ -135,6 +167,9 @@ export type BotConfig = {
   earlyCloseMinAgeSec: number;
   earlyCloseStagnationSec: number;
   autoDeleteWindowHours: number;
+  /** Effective operating mode. TEST_MODE is folded in at load time. */
+  runMode: RunMode;
+  /** True only for "test". Kept for existing callers and diagnostics. */
   testMode: boolean;
   /** Loop cadences in seconds (config-facing). */
   notificationIntervalSec: number;
@@ -172,6 +207,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   }
   const e = parsed.data;
 
+  // RUN_MODE is authoritative. TEST_MODE is kept for existing deployments:
+  // TEST_MODE=1 with no RUN_MODE means "test", which preserves the old
+  // zeroed-threshold behaviour exactly.
+  const runMode: RunMode = e.RUN_MODE ?? (e.TEST_MODE ? "test" : "production");
+  const isTestLike = runMode === "test";
+  const isE2e = runMode === "e2e";
+
   // v1.1 §2.4: acceptance + submission + (N × (poll + replacement)) + scheduling overhead
   const worstCaseGameSec =
     e.ACCEPTANCE_WINDOW_SEC +
@@ -183,15 +225,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const autoDeleteUnsafe =
     e.AUTO_DELETE_WINDOW_HOURS > 0 && windowSec < worstCaseGameSec;
 
-  const notificationSec =
-    e.NOTIFICATION_INTERVAL_SEC ??
-    (e.TEST_MODE ? TEST_LOOP_NOTIFICATION_SEC : LOOP_NOTIFICATION_SEC);
-  const schedulerSec =
-    e.SCHEDULER_INTERVAL_SEC ??
-    (e.TEST_MODE ? TEST_LOOP_SCHEDULER_SEC : LOOP_SCHEDULER_SEC);
-  const recoverySec =
-    e.RECOVERY_INTERVAL_SEC ??
-    (e.TEST_MODE ? TEST_LOOP_RECOVERY_SEC : LOOP_RECOVERY_SEC);
+  const defaultNotificationSec = isE2e
+    ? E2E_LOOP_NOTIFICATION_SEC
+    : isTestLike
+      ? TEST_LOOP_NOTIFICATION_SEC
+      : LOOP_NOTIFICATION_SEC;
+  const defaultSchedulerSec = isE2e
+    ? E2E_LOOP_SCHEDULER_SEC
+    : isTestLike
+      ? TEST_LOOP_SCHEDULER_SEC
+      : LOOP_SCHEDULER_SEC;
+  const defaultRecoverySec = isE2e
+    ? E2E_LOOP_RECOVERY_SEC
+    : isTestLike
+      ? TEST_LOOP_RECOVERY_SEC
+      : LOOP_RECOVERY_SEC;
+
+  const notificationSec = e.NOTIFICATION_INTERVAL_SEC ?? defaultNotificationSec;
+  const schedulerSec = e.SCHEDULER_INTERVAL_SEC ?? defaultSchedulerSec;
+  const recoverySec = e.RECOVERY_INTERVAL_SEC ?? defaultRecoverySec;
 
   return {
     mastodonUrl: e.MASTODON_URL.replace(/\/+$/, ""),
@@ -203,14 +255,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     creationCooldownSec: e.CREATION_COOLDOWN_SEC,
     maxGamesPerPlayer: e.MAX_GAMES_PER_PLAYER,
     replacementGraceMin: e.REPLACEMENT_GRACE_MIN,
-    // EARLY_CLOSE_ENABLED stays operator-controlled even in test mode; only the
-    // thresholds collapse, so a round resolves the moment its tally stops moving
-    // instead of waiting out Mastodon's mandatory 5-minute poll.
+    // EARLY_CLOSE_ENABLED stays operator-controlled in every mode.
+    //
+    // Only "test" collapses the thresholds to zero. This used to be keyed on
+    // TEST_MODE, which meant setting EARLY_CLOSE_MIN_AGE_SEC while TEST_MODE
+    // was on did nothing at all - the configured value was discarded. In
+    // "e2e" and "production" the operator's values are used as given, so a
+    // client has a real window to read a poll and vote.
     earlyCloseEnabled: e.EARLY_CLOSE_ENABLED,
-    earlyCloseMinAgeSec: e.TEST_MODE ? 0 : e.EARLY_CLOSE_MIN_AGE_SEC,
-    earlyCloseStagnationSec: e.TEST_MODE ? 0 : e.EARLY_CLOSE_STAGNATION_SEC,
+    earlyCloseMinAgeSec: isTestLike ? 0 : e.EARLY_CLOSE_MIN_AGE_SEC,
+    earlyCloseStagnationSec: isTestLike ? 0 : e.EARLY_CLOSE_STAGNATION_SEC,
     autoDeleteWindowHours: e.AUTO_DELETE_WINDOW_HOURS,
-    testMode: e.TEST_MODE,
+    runMode,
+    testMode: isTestLike,
     notificationIntervalSec: notificationSec,
     schedulerIntervalSec: schedulerSec,
     recoveryIntervalSec: recoverySec,
