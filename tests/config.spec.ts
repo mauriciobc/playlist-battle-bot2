@@ -138,6 +138,52 @@ describe("loadConfig", () => {
     }
   });
 
+  it("enforces Mastodon's 300s poll floor even in test mode", () => {
+    // A test mode must NOT be able to create a poll Mastodon will reject.
+    expect(() => cfg({ TEST_MODE: "1", POLL_DURATION_SEC: "30" })).toThrow(/POLL_DURATION_SEC/);
+  });
+
+  it("test mode compresses early-close so rounds resolve without waiting for poll expiry", () => {
+    const normal = cfg({ TEST_MODE: undefined, EARLY_CLOSE_ENABLED: undefined });
+    const fast = cfg({ TEST_MODE: "1" });
+
+    expect(normal.earlyCloseEnabled).toBe(true);
+    expect(normal.earlyCloseMinAgeSec).toBe(300);
+    expect(normal.earlyCloseStagnationSec).toBe(300);
+
+    // Enabled by default, and closes as soon as the tally stops moving.
+    expect(fast.earlyCloseEnabled).toBe(true);
+    expect(fast.earlyCloseMinAgeSec).toBe(0);
+    expect(fast.earlyCloseStagnationSec).toBe(0);
+  });
+
+  it("test mode exposes short loop intervals for fast E2E runs", () => {
+    const fast = cfg({ TEST_MODE: "1" });
+    expect(fast.notificationIntervalSec).toBeLessThanOrEqual(5);
+    expect(fast.schedulerIntervalSec).toBeLessThanOrEqual(15);
+    expect(fast.recoveryIntervalSec).toBeLessThanOrEqual(60);
+  });
+
+  it("turns second-based intervals into millisecond timers the runtime can use", () => {
+    // index.ts schedules with setInterval(ms); the config speaks seconds.
+    const fast = cfg({ TEST_MODE: "1" });
+    expect(fast.notificationIntervalSec * 1000).toBe(fast.notificationIntervalMs);
+    expect(fast.schedulerIntervalSec * 1000).toBe(fast.schedulerIntervalMs);
+    expect(fast.recoveryIntervalSec * 1000).toBe(fast.recoveryIntervalMs);
+  });
+
+  it("keeps production loop intervals when test mode is off", () => {
+    const normal = cfg({ TEST_MODE: undefined });
+    expect(normal.notificationIntervalSec).toBe(15);
+    expect(normal.schedulerIntervalSec).toBe(60);
+    expect(normal.recoveryIntervalSec).toBe(300);
+  });
+
+  it("allows explicit interval overrides to win over test mode defaults", () => {
+    const fast = cfg({ TEST_MODE: "1", NOTIFICATION_INTERVAL_SEC: "2" });
+    expect(fast.notificationIntervalSec).toBe(2);
+  });
+
   it("enforces positive acceptance and submission windows", () => {
     expect(() => cfg({ ACCEPTANCE_WINDOW_SEC: "0" })).toThrow(/ACCEPTANCE_WINDOW_SEC/);
     expect(() => cfg({ SUBMISSION_WINDOW_SEC: "-1" })).toThrow(/SUBMISSION_WINDOW_SEC/);

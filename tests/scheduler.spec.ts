@@ -897,6 +897,29 @@ describe("checkPolls — stagnation early close", () => {
     return id;
   }
 
+  it("test-mode thresholds resolve a still-open 300s poll immediately (no waiting)", async () => {
+    // Test mode cannot shorten the poll below Mastodon's 300s floor, so it
+    // resolves stagnant polls as soon as the sweep runs. This is what makes a
+    // full game finish in minutes instead of 8 x 5 minutes.
+    const openedAt = new Date("2026-09-21T12:00:00.000Z");
+    const now = new Date(openedAt.getTime() + 15_000); // 15s after the poll opened
+    schedDeps.now = () => now;
+    schedDeps.earlyClose = { enabled: true, minAgeSec: 0, stagnationSec: 0 };
+
+    const id = seedDuel({
+      expiresAt: new Date(openedAt.getTime() + 300_000).toISOString(),
+      watchedVotes: 0,
+      votesChangedAt: openedAt.toISOString(),
+    });
+
+    await checkPolls(schedDeps);
+
+    const round = db
+      .prepare("SELECT status FROM rounds WHERE game_id = ? AND number = 1")
+      .get(id) as { status: string };
+    expect(round.status).toBe("resolved");
+  });
+
   it("stagnant zero-vote poll past min age → resolves, deletes the poll status, advances", async () => {
     const id = seedDuel({ expiresAt: "2026-09-21T12:10:00.000Z" }); // age 300s
 

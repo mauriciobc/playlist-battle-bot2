@@ -18,10 +18,6 @@ import { resolveTitle, checkAvailable } from "./youtube/oembed.js";
 import { createBattlePlaylistPublisher } from "./youtube/playlist.js";
 import { APP_VERSION, GIT_SHA, VERSION_STAMP } from "./version.js";
 
-const NOTIFICATION_INTERVAL_MS = 15_000;
-const SCHEDULER_INTERVAL_MS = 60_000;
-const RECOVERY_INTERVAL_MS = 5 * 60_000;
-
 async function main(): Promise<void> {
   // Log settings and the build identity come first: a malformed or missing
   // stack.env is the most common fresh-deploy failure, and it must not hide
@@ -138,19 +134,19 @@ async function main(): Promise<void> {
 
   const notificationTimer = setInterval(
     () => runLoop("notifications", () => pollNotifications(deps)),
-    NOTIFICATION_INTERVAL_MS,
+    config.notificationIntervalMs,
   );
   const deadlineTimer = setInterval(
     () => runLoop("deadlines", () => checkDeadlines({ handler: deps, now: deps.now, earlyClose })),
-    SCHEDULER_INTERVAL_MS,
+    config.schedulerIntervalMs,
   );
   const pollTimer = setInterval(
     () => runLoop("polls", () => checkPolls({ handler: deps, now: deps.now, earlyClose })),
-    SCHEDULER_INTERVAL_MS,
+    config.schedulerIntervalMs,
   );
   const recoveryTimer = setInterval(
     () => runLoop("recovery", () => resumeOpenGames({ handler: deps, now: deps.now, earlyClose })),
-    RECOVERY_INTERVAL_MS,
+    config.recoveryIntervalMs,
   );
 
   log.info(
@@ -161,6 +157,10 @@ async function main(): Promise<void> {
       instance: instanceDomain,
       pollDurationSec: config.pollDurationSec,
       earlyClose: config.earlyCloseEnabled,
+      testMode: config.testMode,
+      earlyCloseMinAgeSec: config.earlyCloseMinAgeSec,
+      earlyCloseStagnationSec: config.earlyCloseStagnationSec,
+      schedulerIntervalSec: config.schedulerIntervalSec,
       logLevel: logSettings.level,
       logPretty: logSettings.pretty,
     },

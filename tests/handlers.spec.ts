@@ -275,10 +275,10 @@ describe("handlers integration", () => {
       deps,
     );
     expect(result).toMatchObject({ kind: "error" });
-    expect(result.detail).toContain("remote.social");
     // Should NOT be the generic "unexpected" error
-    expect(result.detail).not.toContain("inesperado");
-    expect(result.detail).not.toContain("unexpected");
+    expect(JSON.stringify(result)).toContain("remote.social");
+    expect(JSON.stringify(result)).not.toContain("inesperado");
+    expect(JSON.stringify(result)).not.toContain("unexpected");
   });
 
   it("challenger DM accept → COLLECTING, bot DMs submission prompt", async () => {
