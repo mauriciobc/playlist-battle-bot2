@@ -466,9 +466,11 @@ async function main() {
 
     say(`  poll ${poll.id}: ${poll.options.map((o) => o.title).join(" vs ")}`);
 
-    // Vote from each participant. Both are legitimate: the host and the
-    // challenger each pick a different option so the poll cannot tie 1-1
-    // purely by accident.
+    // Both participants vote the SAME option, so the round has a winner.
+    //
+    // The previous version had the host pick option 0 and the challenger
+    // option 1 - a guaranteed 1-1 tie, which is why every round resolved as
+    // "EMPATE". The comment claimed the opposite of what the code did.
     const votes: string[] = [];
     const cast = async (api: MastodonAPI, label: string, choice: number) => {
       const r = await api.votePoll(pollStatus.id, poll.id, [choice]);
@@ -477,16 +479,19 @@ async function main() {
     };
 
     const n = poll.options.length;
-    await cast(host, "host", 0);
-    if (n > 1) await cast(player, "challenger", 1);
+    const pick = 0; // both sides back the first tune
+    await cast(host, "host", pick);
+    if (n > 1) await cast(player, "challenger", pick);
 
-    // Confirm the vote is reflected, rather than assuming the POST worked.
+    // Confirm the vote actually landed: the poll must now report a voter.
+    // "a poll is still readable" is true whether or not the POST worked.
     await until(
       async () => {
         const fresh = await world.botActivity();
-        return fresh.some((s) => s.hasPoll);
+        const p = fresh.find((s) => s.hasPoll)?.poll;
+        return p && p.voters_count > 0 ? p : undefined;
       },
-      "poll state readable after voting",
+      `poll tallied ${2} votes`,
       cfg.backstop.poll,
       world,
     );
