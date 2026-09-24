@@ -68,6 +68,10 @@ const FALLBACK_TUNES = [
   "https://www.youtube.com/watch?v=uelHwf8o7_U",
   "https://www.youtube.com/watch?v=2Vv-BfVoq4g",
   "https://www.youtube.com/watch?v=hT_nvWreIhg",
+  // Also proven in live games; the two players cannot share a video in
+  // any round, so the pool must be larger than one playlist.
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "https://www.youtube.com/watch?v=9bZkp7q19f0",
 ];
 
 function loadConfig(): Cfg {
@@ -97,12 +101,21 @@ function loadConfig(): Cfg {
   //
   // An explicit TUNE_URLS_PLAYER1 in the environment is trusted as-is: if
   // it overlaps the host's list on purpose, that is the operator's call.
-  const hostUrls = urls("TUNE_URLS_HOST");
-  let playerUrls = split("TUNE_URLS_PLAYER1");
-  if (playerUrls.length === 0) {
-    const half = Math.ceil(FALLBACK_TUNES.length / 2);
-    playerUrls = FALLBACK_TUNES.slice(half).concat(FALLBACK_TUNES.slice(0, half));
-  }
+  // Deal alternately from one pool: even indices to the host, odd indices to
+  // the player. No two players then hold the same video in the same round.
+  // Slicing or rotating a single list cannot do this - it only reorders the
+  // same URLs, so every round still collides and the bot auto-ties instead
+  // of polling (src/game/types.ts:125, hasRoundCollision).
+  const envHost = split("TUNE_URLS_HOST");
+  const envPlayer = split("TUNE_URLS_PLAYER1");
+  const pool = envHost.length > 0 ? envHost : FALLBACK_TUNES;
+  const half = Math.floor(pool.length / 2);
+  const hostUrls = envHost.length > 0
+    ? envHost
+    : pool.filter((_, i) => i % 2 === 0).slice(0, half);
+  const playerUrls = envPlayer.length > 0
+    ? envPlayer
+    : pool.filter((_, i) => i % 2 === 1).slice(0, half);
   const shared = playerUrls.filter((u) => hostUrls.includes(u));
   if (shared.length > 0) {
     throw new Error(
@@ -123,7 +136,10 @@ function loadConfig(): Cfg {
     // among everything else the bot announces. A fixed name collides with
     // games left over from earlier runs.
     theme: `${vals.GAME_THEME || vals.THEME || "E2E"} r${Date.now().toString(36)}`,
-    playlistLength: n("PLAYLIST_LENGTH", 8),
+    // Never more rounds than there are distinct videos to fill them: a
+    // player one tune short makes the round un-pollable and the game ends
+    // with a default winner.
+    playlistLength: n("PLAYLIST_LENGTH", Math.min(8, Math.floor(pool.length / 2))),
     pollDurationSec: n("POLL_DURATION_SEC", 300),
     tuneUrlsHost: hostUrls,
     tuneUrlsPlayer1: playerUrls,

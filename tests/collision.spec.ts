@@ -18,7 +18,7 @@ function tune(accountId: string, videoId: string, position: number): Tune {
     accountId,
     videoId,
     position,
-    url: `https://youtu.be/${videoId}`,
+    canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
     title: videoId,
   } as Tune;
 }
