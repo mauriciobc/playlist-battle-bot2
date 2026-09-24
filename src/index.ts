@@ -5,7 +5,7 @@ import { createLoopRunner } from "./singleFlight.js";
 import { setLocale } from "./i18n/index.js";
 import { migrate, openDatabase, type Db } from "./db/index.js";
 import { markStaleOutboxEffectsUnknown, releasePendingNotificationClaims, touchLoopHeartbeat } from "./game/store.js";
-import { MastodonClient } from "./mastodon/client.js";
+import { MastodonClient, RateLimitError } from "./mastodon/client.js";
 import { initializeNotificationCursor, pollNotifications } from "./mastodon/poller.js";
 import {
   checkDeadlines,
@@ -118,15 +118,42 @@ async function main(): Promise<void> {
   touchLoopHeartbeat(db, "recovery", deps.now());
   log.info("resumeOpenGames complete");
 
+  /** Per-loop pause imposed by a rate limit, cleared once resetAt passes. */
+  const backoffUntil = new Map<string, Date>();
+
   // Single-flight per loop: a tick that overruns (retry sleeps, Retry-After)
   // must not overlap the next one and double-resolve a poll/notification.
   const run = createLoopRunner({
     onSkip: (loop) => log.warn({ loop }, "previous tick still running; skipping this one"),
-    onError: (loop, err) => log.error({ err, loop }, "interval task failed; will retry next tick"),
+    onError: (loop, err) => {
+      log.error({ err, loop }, "interval task failed; will retry next tick");
+      // A rate-limited tick must not be retried on the normal cadence. Each
+      // retry is another rejected request, and a rejected request refreshes
+      // the very window being waited out: at 5s per tick under RUN_MODE=e2e
+      // the loop never stopped, holding the cursor frozen for the whole
+      // window (47 cycles in 4 minutes). Back off until Mastodon says the
+      // window resets. Every other error still retries next tick.
+      if (err instanceof RateLimitError) {
+        const until = new Date(err.resetAt * 1000);
+        backoffUntil.set(loop, until);
+        log.warn(
+          { loop, until: until.toISOString() },
+          "rate limited; suspending loop until the window resets",
+        );
+      }
+    },
   });
+
 
   const runLoop = (label: string, task: () => Promise<unknown>): void => {
     run(label, async () => {
+      // Skip quietly while a rate limit is in force. Ticking anyway is what
+      // turned a five-minute window into a permanent one.
+      const until = backoffUntil.get(label);
+      if (until && until.getTime() > deps.now().getTime()) {
+        return;
+      }
+      if (until) backoffUntil.delete(label);
       await task();
       touchLoopHeartbeat(db, label, deps.now());
     });
