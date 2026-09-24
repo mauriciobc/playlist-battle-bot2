@@ -165,7 +165,11 @@ class MastodonAPI {
 
   /** Vote on a poll. optionIndices is 0-based. */
   async votePoll(statusId: string, pollId: string, choices: number[]): Promise<MastodonPoll> {
-    return this.request("POST", `/polls/${pollId}/vote`, { choices });
+    // Route is /polls/:id/votes (plural) - see config/routes/api.rb:
+    //   resources :polls, only: [:show] do
+    //     resources :votes, only: :create, module: :polls
+    //   end
+    return this.request("POST", `/polls/${pollId}/votes`, { choices });
   }
 
   /** Look up an account by handle, returning its id. */
