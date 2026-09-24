@@ -65,9 +65,14 @@ export interface Cast {
  * the opposite of what the code did.
  */
 export function castPlan(optionCount: number, pick: number): Cast[] {
+  // optionCount < 2 means there is nothing to compare - one option cannot lose,
+  // so the round would be a walkover rather than a poll.
   if (optionCount < 2) return [{ label: "host", choice: pick }];
   return [
     { label: "host", choice: pick },
     { label: "challenger", choice: pick },
+    // The spectator. ROUND_QUORUM is 3, so the two players alone always tie;
+    // the driver supplies the third vote itself since the bot owns the poll.
+    { label: "voter", choice: 1 },
   ];
 }

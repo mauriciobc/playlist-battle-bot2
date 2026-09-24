@@ -35,6 +35,13 @@ const server = new MockMastodonServer({
 // host and challenger are the same account - refused as a duplicate.
 server.registerToken("host-token", "host@mock.social");
 server.registerToken("player-token", "player@mock.social");
+// A third voter. ROUND_QUORUM is 3 (src/game/scoring.ts), so a round with
+// only the two players voting ties by rule - resolveRoundScore returns
+// winnerAccountId null when totalVotes < ROUND_QUORUM, and the bot was
+// correct to call those ties. The bot cannot be the third voter: it owns the
+// poll. A spectator account is the honest way to reach quorum through the
+// same POST /polls/:id/votes route everything else uses.
+server.registerToken("voter-token", "voter@mock.social");
 await server.start();
 
 const url = server.baseUrl;
@@ -45,6 +52,7 @@ writeFileSync(
     `MOCK_BOT_TOKEN=${server.token}`,
     `MOCK_HOST_TOKEN=host-token`,
     `MOCK_PLAYER_TOKEN=player-token`,
+    `MOCK_VOTER_TOKEN=voter-token`,
     "",
   ].join("\n"),
 );

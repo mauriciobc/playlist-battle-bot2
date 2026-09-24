@@ -145,6 +145,11 @@ async function main(): Promise<void> {
   // refused the game as a duplicate player.
   vals.HOST_TOKEN = endpoint.MOCK_HOST_TOKEN ?? "host-token";
   vals.PLAYER1_TOKEN = endpoint.MOCK_PLAYER_TOKEN ?? "player-token";
+  // The third voter, cast from the player's token - the mock treats any
+  // bearer as its own account, and the point is the ROUTE, not the identity.
+  // A dedicated account keeps the tally readable in the bot's database.
+  vals.VOTER1_TOKEN = endpoint.MOCK_VOTER_TOKEN ?? "voter-token";
+  vals.VOTER1_ACCT = "voter@mock.social";
 
   // The driver deals a single pool alternately (even -> host, odd -> player)
   // and clamps rounds to floor(pool.length / 2). Handing it one pool of 16

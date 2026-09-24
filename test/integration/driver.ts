@@ -43,6 +43,13 @@ interface Cfg {
   player1Instance: string;
   player1Token: string;
   player1Acct: string;
+  /**
+   * A third voter, needed to reach ROUND_QUORUM (3). The two players
+   * always tie without it, and the bot cannot supply the third vote
+   * because it owns the poll.
+   */
+  voter1Token: string;
+  voter1ApiUrl: string;
   theme: string;
   playlistLength: number;
   /** Rounds the proven tune pool can actually fill. */
@@ -152,6 +159,15 @@ function loadConfig(): Cfg {
     player1Instance: vals.PLAYER1_INSTANCE || "ursal.zone",
     player1Token: vals.PLAYER1_TOKEN || vals.PLAYER_TOKEN || "",
     player1Acct: vals.PLAYER1_ACCT || "",
+    // A third voter, needed to reach ROUND_QUORUM (3): the two players
+    // alone always tie by rule, and the bot owns the poll so it cannot
+    // supply the third vote. resolveBaseUrl takes (override, host), so the
+    // voter's origin is its own override when set, else the player's.
+    voter1Token: vals.VOTER1_TOKEN ?? vals.PLAYER1_TOKEN ?? "",
+    voter1ApiUrl: resolveBaseUrl(
+      vals.VOTER1_API_URL ?? vals.PLAYER1_API_URL,
+      vals.PLAYER1_INSTANCE || "ursal.zone",
+    ),
     // Unique per run: the theme is how the driver recognises its own game
     // among everything else the bot announces. A fixed name collides with
     // games left over from earlier runs.

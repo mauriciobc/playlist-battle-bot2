@@ -69,10 +69,38 @@ describe("voting every round", () => {
     ).toBe(false);
   });
 
-  it("voters on the tally reflect the casts, not the poll's own author", () => {
-    // Both sides back option 0, so the round has a winner. The old code had
-    // host on 0 and player on 1 - a guaranteed 1-1 tie every round.
+  it("casts three votes: two players on option 0, a spectator on option 1", () => {
+    // ROUND_QUORUM is 3 (src/game/scoring.ts:29). With only the two players,
+    // totalVotes is 2 and resolveRoundScore returns winnerAccountId: null -
+    // the bot was reading the rule correctly, not failing. The bot cannot be
+    // the third voter: it owns the poll.
+    //
+    // The spectator backs the OTHER option, so the round resolves 2-1 and the
+    // bot has to compare. A unanimous tally would pass without the comparison
+    // ever running.
     const votes = castPlan(2, 0);
-    expect(votes).toEqual([{ label: "host", choice: 0 }, { label: "challenger", choice: 0 }]);
+    expect(votes).toEqual([
+      { label: "host", choice: 0 },
+      { label: "challenger", choice: 0 },
+      { label: "voter", choice: 1 },
+    ]);
+  });
+
+  it("three votes with a unique leader is the shape that produces a winner", () => {
+    // Guard the reason the third voter exists, so the test fails if the
+    // quorum rule changes and the harness silently ties again.
+    const votes = castPlan(2, 0);
+    const tally = new Map<number, number>();
+    for (const v of votes) tally.set(v.choice, (tally.get(v.choice) ?? 0) + 1);
+    const sorted = [...tally.values()].sort((a, b) => b - a);
+    expect(sorted[0]).toBe(2);
+    expect(sorted.filter((n) => n === sorted[0]).length).toBe(1);
+    expect(sorted.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("does not cast a spectator vote when there is nothing to compare", () => {
+    // One option cannot lose, so the round is a walkover, not a poll. The
+    // driver's guard is on option count.
+    expect(castPlan(1, 0)).toEqual([{ label: "host", choice: 0 }]);
   });
 });
