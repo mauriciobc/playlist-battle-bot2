@@ -30,21 +30,25 @@ import { setLocale } from "../src/i18n/index.js";
 import { Harness, SCENARIOS, type Scenario } from "./e2e-console.js";
 
 /** Discarded repeats, to let the JIT settle before measurement. */
-const WARMUP_REPEATS = 2;
+const WARMUP_REPEATS = 3;
 /**
  * Timed repeats. The metric is their fastest, so the count is set by how many
  * samples it takes for an uninterrupted one to appear, balanced against
  * keeping a run to a few seconds.
  */
-const TIMED_REPEATS = 15;
-/** RNG-fuzz passes: votes are drawn from mulberry32(seed). */
-const RANDOM_SEEDS = [7, 42, 2024];
+const TIMED_REPEATS = 25;
+/**
+ * RNG-fuzz passes: votes are drawn from mulberry32(seed). Several seeds, so the
+ * workload covers different tie/win/walkover/finale paths, and so one repeat is
+ * long enough that a percent of real improvement outlives measurement jitter.
+ */
+const RANDOM_SEEDS = [7, 42, 2024, 99, 1234, 31337];
 /**
  * Checks the fixed workload must produce (113–114 per pass, depending on the
- * seed's finale assertions, × 4 passes). Pinned so that weakening an assertion
+ * seed's finale assertions, × 7 passes). Pinned so that weakening an assertion
  * cannot buy speed: the run fails when it changes.
  */
-const EXPECTED_CHECKS = 455;
+const EXPECTED_CHECKS = 797;
 
 type Pass = { label: string; random: boolean; seed: number };
 
