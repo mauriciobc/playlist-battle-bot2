@@ -28,7 +28,7 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { driverExitCode } from "./driver-exit.js";
-import { castPlan, keepVoting } from "./vote-planner.js";
+import { castPlan, keepVoting, withVoter } from "./vote-planner.js";
 import {
   inRunGame,
   isRefusalText,
@@ -169,11 +169,16 @@ function loadConfig(): Cfg {
     player1Instance: vals.PLAYER1_INSTANCE || "ursal.zone",
     player1Token: vals.PLAYER1_TOKEN || vals.PLAYER_TOKEN || "",
     player1Acct: vals.PLAYER1_ACCT || "",
-    // A third voter, needed to reach ROUND_QUORUM (3): the two players
-    // alone always tie by rule, and the bot owns the poll so it cannot
-    // supply the third vote. resolveBaseUrl takes (override, host), so the
-    // voter's origin is its own override when set, else the player's.
-    voter1Token: vals.VOTER1_TOKEN ?? vals.PLAYER1_TOKEN ?? "",
+    // A third voter, OPTIONAL. ROUND_QUORUM is 3, so two votes tie by rule -
+    // and a tie is a valid outcome, not a failure, so the game runs without
+    // one. When it is set, the spectator votes the OTHER option, so the round
+    // resolves 2-1 and the bot has to compare the tallies rather than
+    // rubber-stamp a unanimous tally.
+    //
+    // No fallback to the player's token: the mock accepts any bearer string,
+    // so back-filling would pass there and make the tally lie against real
+    // Mastodon, where one account voting twice counts once.
+    voter1Token: vals.VOTER1_TOKEN ?? "",
     voter1ApiUrl: resolveBaseUrl(
       vals.VOTER1_API_URL ?? vals.PLAYER1_API_URL,
       vals.PLAYER1_INSTANCE || "ursal.zone",
@@ -404,7 +409,9 @@ async function main() {
   // The third voter. ROUND_QUORUM is 3 (src/game/scoring.ts:29), so two
   // players always tie by rule, and the bot cannot supply the third
   // vote because it owns the poll.
-  const voter = new MastodonAPI(cfg.voter1ApiUrl, cfg.voter1Token, cfg.debug);
+  const voter = cfg.voter1Token
+    ? new MastodonAPI(cfg.voter1ApiUrl, cfg.voter1Token, cfg.debug)
+    : null;
   const world = new World(cfg, player);
 
   say("resolving identities…");
@@ -567,7 +574,10 @@ async function main() {
     // the spectator backs option 1, so the round resolves 2-1: ROUND_QUORUM is
     // 3, and a unanimous tally would satisfy it without the bot ever
     // comparing anything.
-    const clients: Record<string, MastodonAPI> = { host, challenger: player, voter };
+    const clients: Record<string, MastodonAPI> = { host, challenger: player };
+    // Only when the operator supplied a third identity. Absent one, the round
+    // is a 2-0 tie - a valid outcome, not a failure.
+    if (voter) clients.voter = voter;
     const votedPolls = new Set<string>();
     const tally: string[] = [];
     let round = 1;
@@ -605,7 +615,9 @@ async function main() {
       }
 
       say(`  round ${round}: poll ${pollId} — ${open.poll.options.map((o) => o.title).join(" vs ")}`);
-      const casts = castPlan(open.poll.options.length, 0);
+      const casts = voter
+        ? withVoter(castPlan(open.poll.options.length, 0), open.poll.options.length)
+        : castPlan(open.poll.options.length, 0);
       for (const { label, choice } of casts) {
         const api = clients[label];
         if (!api) {
@@ -629,7 +641,9 @@ async function main() {
         cfg.backstop.poll,
         world,
       );
-      say(`  round ${round - 1} voted: ${casts.map((c) => c.label).join(" + ")}`);
+      say(
+        `  round ${round - 1} voted: ${casts.map((c: { label: string }) => c.label).join(" + ")}`,
+      );
     }
 
     if (tally.length === 0) {
