@@ -4,7 +4,12 @@ import { createLogger } from "./logger.js";
 import { createLoopRunner } from "./singleFlight.js";
 import { setLocale } from "./i18n/index.js";
 import { migrate, openDatabase, type Db } from "./db/index.js";
-import { markStaleOutboxEffectsUnknown, releasePendingNotificationClaims, touchLoopHeartbeat } from "./game/store.js";
+import {
+  LOOP_LABELS,
+  markPendingOutboxEffectsUnknown,
+  releasePendingNotificationClaims,
+  touchLoopHeartbeat,
+} from "./game/store.js";
 import { MastodonClient, RateLimitError } from "./mastodon/client.js";
 import { initializeNotificationCursor, pollNotifications } from "./mastodon/poller.js";
 import {
@@ -51,7 +56,7 @@ async function main(): Promise<void> {
       `BOT_ACCT does not match the token account: configured ${config.botAcct}, token ${me.username}`,
     );
   }
-  const unknownEffects = markStaleOutboxEffectsUnknown(db, 0);
+  const unknownEffects = markPendingOutboxEffectsUnknown(db);
   if (unknownEffects > 0) {
     log.warn({ unknownEffects }, "outbox effects marked unknown after restart; inspect before retrying");
   }
@@ -79,14 +84,10 @@ async function main(): Promise<void> {
     submissionWindowSec: config.submissionWindowSec,
     creationCooldownSec: config.creationCooldownSec,
     maxGamesPerPlayer: config.maxGamesPerPlayer,
-    lookup: async (acct: string) => {
-      const r = await client.get<{ id: string; acct: string; username: string }>(
-        `/api/v1/accounts/lookup?acct=${encodeURIComponent(acct)}`,
-      );
-      return { id: r.id, acct: r.acct, username: r.username };
-    },
+    lookup: (acct: string) =>
+      client.get<{ id: string; acct: string }>(`/api/v1/accounts/lookup?acct=${encodeURIComponent(acct)}`),
     resolveTitle: (videoId: string) => resolveTitle(videoId, { db }),
-    checkAvailable: (videoId: string) => checkAvailable(videoId),
+    checkAvailable,
     // Fails fast at boot when a configured cookie is unusable.
     publishBattlePlaylist: createBattlePlaylistPublisher({
       auth: config.ytCookie
@@ -98,23 +99,23 @@ async function main(): Promise<void> {
     replacementGraceMin: config.replacementGraceMin,
     now: () => new Date(),
     newGameId: () => randomUUID(),
+    logger: log,
+  };
+  const scheduler = {
+    handler: deps,
+    earlyClose: {
+      enabled: config.earlyCloseEnabled,
+      minAgeSec: config.earlyCloseMinAgeSec,
+      stagnationSec: config.earlyCloseStagnationSec,
+    },
   };
   // Fast path for poll-expiry notifications (breaks handler → scheduler import cycle)
   deps.onPollExpired = async (statusId) => {
-    await checkPollNotification({ handler: deps, now: deps.now }, statusId);
-  };
-  // Unexpected player-facing failures keep their internals in the log only.
-  deps.log = (message, detail) => log.warn({ detail }, message);
-  deps.logger = log;
-
-  const earlyClose = {
-    enabled: config.earlyCloseEnabled,
-    minAgeSec: config.earlyCloseMinAgeSec,
-    stagnationSec: config.earlyCloseStagnationSec,
+    await checkPollNotification(scheduler, statusId);
   };
 
   // Recover open games from previous run (PRD §7 restart)
-  await resumeOpenGames({ handler: deps, now: deps.now, earlyClose });
+  await resumeOpenGames(scheduler);
   touchLoopHeartbeat(db, "recovery", deps.now());
   log.info("resumeOpenGames complete");
 
@@ -144,37 +145,26 @@ async function main(): Promise<void> {
     },
   });
 
-
-  const runLoop = (label: string, task: () => Promise<unknown>): void => {
-    run(label, async () => {
-      // Skip quietly while a rate limit is in force. Ticking anyway is what
-      // turned a five-minute window into a permanent one.
-      const until = backoffUntil.get(label);
-      if (until && until.getTime() > deps.now().getTime()) {
-        return;
-      }
-      if (until) backoffUntil.delete(label);
-      await task();
-      touchLoopHeartbeat(db, label, deps.now());
-    });
+  const loops: Record<(typeof LOOP_LABELS)[number], [intervalSec: number, task: () => Promise<unknown>]> = {
+    notifications: [config.notificationIntervalSec, () => pollNotifications(deps)],
+    deadlines: [config.schedulerIntervalSec, () => checkDeadlines(scheduler)],
+    polls: [config.schedulerIntervalSec, () => checkPolls(scheduler)],
+    recovery: [config.recoveryIntervalSec, () => resumeOpenGames(scheduler)],
   };
-
-  const notificationTimer = setInterval(
-    () => runLoop("notifications", () => pollNotifications(deps)),
-    config.notificationIntervalMs,
-  );
-  const deadlineTimer = setInterval(
-    () => runLoop("deadlines", () => checkDeadlines({ handler: deps, now: deps.now, earlyClose })),
-    config.schedulerIntervalMs,
-  );
-  const pollTimer = setInterval(
-    () => runLoop("polls", () => checkPolls({ handler: deps, now: deps.now, earlyClose })),
-    config.schedulerIntervalMs,
-  );
-  const recoveryTimer = setInterval(
-    () => runLoop("recovery", () => resumeOpenGames({ handler: deps, now: deps.now, earlyClose })),
-    config.recoveryIntervalMs,
-  );
+  const timers = LOOP_LABELS.map((label) => {
+    const [intervalSec, task] = loops[label];
+    return setInterval(() => {
+      run(label, async () => {
+        // Skip quietly while a rate limit is in force. Ticking anyway is what
+        // turned a five-minute window into a permanent one.
+        const until = backoffUntil.get(label);
+        if (until && until.getTime() > deps.now().getTime()) return;
+        backoffUntil.delete(label);
+        await task();
+        touchLoopHeartbeat(db, label, deps.now());
+      });
+    }, intervalSec * 1000);
+  });
 
   log.info(
     {
@@ -185,7 +175,6 @@ async function main(): Promise<void> {
       pollDurationSec: config.pollDurationSec,
       earlyClose: config.earlyCloseEnabled,
       runMode: config.runMode,
-      testMode: config.testMode,
       earlyCloseMinAgeSec: config.earlyCloseMinAgeSec,
       earlyCloseStagnationSec: config.earlyCloseStagnationSec,
       schedulerIntervalSec: config.schedulerIntervalSec,
@@ -200,10 +189,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info({ signal }, "shutting down");
-    clearInterval(notificationTimer);
-    clearInterval(deadlineTimer);
-    clearInterval(pollTimer);
-    clearInterval(recoveryTimer);
+    for (const timer of timers) clearInterval(timer);
     await run.drain();
     try {
       db.close();

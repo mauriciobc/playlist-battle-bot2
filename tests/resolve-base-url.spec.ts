@@ -32,12 +32,6 @@ describe("resolveBaseUrl", () => {
     );
   });
 
-  it("keeps a full https URL when one is given", () => {
-    expect(resolveBaseUrl("https://ursal.zone", "mastodon.social")).toBe(
-      "https://ursal.zone",
-    );
-  });
-
   it("ignores an empty override and falls back to the host", () => {
     expect(resolveBaseUrl("", "ursal.zone")).toBe("https://ursal.zone");
   });

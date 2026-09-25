@@ -3,7 +3,6 @@ import { MastodonApiError, RateLimitError } from "../mastodon/client.js";
 import type { MastodonClient, RequestOptions } from "../mastodon/client.js";
 import type { Logger } from "../logger.js";
 import { classifyNotification, type RawNotification } from "../mastodon/notifications.js";
-import { sourceStatuses } from "../game/stateMachine.js";
 import {
   htmlToText,
   parseCreateCommand,
@@ -20,7 +19,7 @@ import {
   ValidationError,
 } from "../game/engine.js";
 import { assertCanCreateGame, RateLimitedError } from "../game/rateLimit.js";
-import type { Game, Player } from "../game/types.js";
+import type { Game } from "../game/types.js";
 import {
   insertGame,
   insertPlayer,
@@ -35,15 +34,16 @@ import {
   openGamesForAccount,
   roundMeta,
   saveGame,
-  savePlayer,
+  saveGameState,
 } from "../game/store.js";
 import { emitRound } from "../scheduler/roundState.js";
 import { dm } from "../mastodon/dm.js";
 import { extractVideoId } from "../youtube/normalize.js";
+import type { ResolvedTune } from "../youtube/oembed.js";
 import type { BattlePlaylistPublisher } from "../youtube/playlist.js";
 import { assertPostLength } from "../templates/truncate.js";
 import { m } from "../i18n/index.js";
-import { voidOpenGame } from "./closure.js";
+import { CLOSURES, voidOpenGame } from "./closure.js";
 
 export type HandlerDeps = {
   db: Db;
@@ -55,8 +55,8 @@ export type HandlerDeps = {
   submissionWindowSec: number;
   creationCooldownSec: number;
   maxGamesPerPlayer: number;
-  lookup: (acct: string) => Promise<{ id: string; acct: string; username: string }>;
-  resolveTitle: (videoId: string) => Promise<{ videoId: string; title: string; author: string | null; canonicalUrl: string }>;
+  lookup: (acct: string) => Promise<{ id: string; acct: string }>;
+  resolveTitle: (videoId: string) => Promise<ResolvedTune>;
   /** Live availability check for a video (never reads the title cache). */
   checkAvailable: (videoId: string) => Promise<boolean>;
   /**
@@ -77,16 +77,13 @@ export type HandlerDeps = {
    */
   onPollExpired?: (statusId: string | null) => Promise<void>;
   /**
-   * Diagnostics sink for unexpected errors whose text must never reach a player
-   * (oEmbed/SQLite internals). Optional so tests can omit it.
-   */
-  log?: (message: string, detail?: unknown) => void;
-  /**
-   * Structured leveled logger for live debugging (notification flow, sweeps).
-   * Optional so tests can omit it.
+   * Structured logger. Unexpected errors whose text must never reach a player
+   * (oEmbed/SQLite internals) are logged here instead. Optional so tests can omit it.
    */
   logger?: Logger;
 };
+
+type Visibility = "public" | "unlisted" | "private";
 
 export type CommandInput = {
   accountId: string;
@@ -94,20 +91,20 @@ export type CommandInput = {
   statusId: string;
   content: string;
   inReplyToId: string | null;
-  visibility?: "public" | "unlisted" | "private";
+  visibility?: Visibility;
 };
 
-export type HandlerResult =
-  | { handled: false; reason: string }
-  | { handled: true; kind: string; detail?: unknown };
+type Handled = { handled: true; kind: string; detail?: unknown };
 
-// ── outbound helpers ────────────────────────────────────────
+export type HandlerResult = { handled: false; reason: string } | Handled;
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 async function reply(
   deps: HandlerDeps,
   inReplyToId: string,
   text: string,
-  visibility: "public" | "unlisted" | "private" | "direct" = "public",
+  visibility: Visibility = "public",
   options: RequestOptions = {},
 ): Promise<string> {
   assertPostLength(text);
@@ -119,79 +116,56 @@ async function reply(
   return status.id;
 }
 
-function dmTo(
-  deps: HandlerDeps,
-  accountId: string,
-  text: string,
-  fallbackAcct?: string,
-  options: RequestOptions = {},
-): Promise<string> {
-  return dm(deps.db, deps.client, accountId, text, fallbackAcct, options, deps.instanceDomain);
-}
-
-async function resumeCreation(
-  input: CommandInput,
+/**
+ * Finish a CREATED game: post the thread root on the creation mention, DM
+ * every invite not yet sent, then open it (INVITED). Every step is idempotent
+ * and persisted as it lands, so a crash anywhere resumes here — from a
+ * redelivered mention or from the scheduler's recovery sweep.
+ */
+export async function completeCreation(
   deps: HandlerDeps,
   gameId: string,
-  visibility: "public" | "unlisted" | "private",
-): Promise<HandlerResult> {
+  creationStatusId: string,
+  visibility: Visibility,
+): Promise<void> {
   let game = loadGame(deps.db, gameId);
-  if (!game) throw new Error(`Creation game ${gameId} no longer exists`);
-  if (game.status !== "CREATED") {
-    return { handled: true, kind: "game_created", detail: game.id };
-  }
+  if (game?.status !== "CREATED") return;
+  const players = loadPlayers(deps.db, gameId);
+  const deadline = game.acceptanceDeadline ?? "";
 
-  let rootReplyId = game.threadRootId;
-  if (!rootReplyId) {
-    const players = loadPlayers(deps.db, game.id);
-    rootReplyId = await reply(
+  if (!game.threadRootId) {
+    const threadRootId = await reply(
       deps,
-      input.statusId,
-      m().gameCreated(
-        game.theme,
-        game.playlistLength,
-        players.length,
-        game.acceptanceDeadline ?? "",
-        game.id,
-      ),
+      creationStatusId,
+      m().gameCreated(game.theme, game.playlistLength, players.length, deadline, game.id),
       visibility,
-      { idempotencyKey: `pb:v1:creation:${input.statusId}:root` },
+      { idempotencyKey: `pb:v1:creation:${creationStatusId}:root` },
     );
-    game = { ...game, threadRootId: rootReplyId, updatedAt: deps.now().toISOString() };
-    if (!saveGame(deps.db, game, "CREATED")) {
-      return { handled: true, kind: "game_created", detail: game.id };
-    }
+    game = { ...game, threadRootId, updatedAt: deps.now().toISOString() };
+    if (!saveGame(deps.db, game, "CREATED")) return;
   }
 
-  for (const player of loadPlayers(deps.db, game.id).filter((p) => p.inviteStatus === "pending")) {
-    const sent = deps.db
-      .prepare("SELECT invite_sent_at FROM players WHERE game_id = ? AND account_id = ?")
-      .get(game.id, player.accountId) as { invite_sent_at: string | null } | undefined;
-    if (sent?.invite_sent_at) continue;
-    const hostAcct = loadPlayers(deps.db, game.id).find((p) => p.role === "host")?.acct ?? "?";
-    const inviteText = m().inviteDm(
-      game.theme,
-      hostAcct,
-      game.playlistLength,
-      game.acceptanceDeadline ?? "",
-    );
-    await dmTo(
+  const hostAcct = players.find((p) => p.role === "host")?.acct ?? "?";
+  const unsent = deps.db
+    .prepare(
+      `SELECT account_id, acct FROM players
+       WHERE game_id = ? AND invite_status = 'pending' AND invite_sent_at IS NULL ORDER BY rowid`,
+    )
+    .all(game.id) as { account_id: string; acct: string }[];
+  for (const p of unsent) {
+    await dm(
       deps,
-      player.accountId,
-      inviteText,
-      player.acct,
-      { idempotencyKey: `pb:v1:creation:${game.id}:invite:${player.accountId}` },
+      p.account_id,
+      m().inviteDm(game.theme, hostAcct, game.playlistLength, deadline),
+      p.acct,
+      { idempotencyKey: `pb:v1:creation:${game.id}:invite:${p.account_id}` },
     );
     deps.db
       .prepare("UPDATE players SET invite_sent_at = ? WHERE game_id = ? AND account_id = ?")
-      .run(deps.now().toISOString(), game.id, player.accountId);
+      .run(deps.now().toISOString(), game.id, p.account_id);
   }
 
-  game = loadGame(deps.db, game.id)!;
-  if (game.status === "CREATED") {
-    saveGame(deps.db, { ...game, status: "INVITED", updatedAt: deps.now().toISOString() }, "CREATED");
-  }
-  return { handled: true, kind: "game_created", detail: game.id };
+  saveGame(deps.db, { ...game, status: "INVITED", updatedAt: deps.now().toISOString() }, "CREATED");
 }
 
 // ── public command handler ──────────────────────────────────
@@ -199,20 +173,23 @@ async function resumeCreation(
 export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps): Promise<HandlerResult> {
   const text = htmlToText(input.content);
   const replyVisibility = input.visibility ?? "public";
+  const rejectPrivate = async (): Promise<HandlerResult> => {
+    const message = m().errPrivateCreate();
+    await reply(deps, input.statusId, message, replyVisibility);
+    return { handled: true, kind: "error", detail: message };
+  };
+
   const existingCreation = deps.db
     .prepare("SELECT id, creation_visibility FROM games WHERE creation_status_id = ?")
     .get(input.statusId) as { id: string; creation_visibility: string } | undefined;
   if (existingCreation) {
-    if (existingCreation.creation_visibility === "private") {
-      const message = m().errPrivateCreate();
-      await reply(deps, input.statusId, message, replyVisibility);
-      return { handled: true, kind: "error", detail: message };
-    }
-    return resumeCreation(input, deps, existingCreation.id, replyVisibility);
+    if (existingCreation.creation_visibility === "private") return rejectPrivate();
+    await completeCreation(deps, existingCreation.id, input.statusId, replyVisibility);
+    return { handled: true, kind: "game_created", detail: existingCreation.id };
   }
 
   if (parseStatusCommand(text, deps.botAcct)) {
-    return handleStatus(input, deps, text);
+    return handleStatus(input, deps);
   }
 
   const cmd = parseCreateCommand(text, deps.botAcct, deps.instanceDomain);
@@ -223,11 +200,7 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
     return { handled: true, kind: "error", detail: cmd.error };
   }
 
-  if (replyVisibility === "private") {
-    const message = m().errPrivateCreate();
-    await reply(deps, input.statusId, message, replyVisibility);
-    return { handled: true, kind: "error", detail: message };
-  }
+  if (replyVisibility === "private") return rejectPrivate();
 
   let persisted = false;
   try {
@@ -253,14 +226,15 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
       }
     }
 
-    const host = {
-      accountId: input.accountId,
-      // Local accounts report a bare username; remote ones carry "user@domain".
-      acct: input.accountAcct,
-    };
-
     const { game, players } = createGameInput(
-      { host, theme: cmd.theme, playlistLength: cmd.playlistLength, challengers, now: deps.now() },
+      {
+        // Local accounts report a bare username; remote ones carry "user@domain".
+        host: { accountId: input.accountId, acct: input.accountAcct },
+        theme: cmd.theme,
+        playlistLength: cmd.playlistLength,
+        challengers,
+        now: deps.now(),
+      },
       {
         pollDurationSec: deps.pollDurationSec,
         acceptanceWindowSec: deps.acceptanceWindowSec,
@@ -268,65 +242,30 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
       },
     );
 
-    const deadline = game.acceptanceDeadline ?? "";
-    const createdGame: Game = { ...game, status: "CREATED", threadRootId: null };
     deps.db.transaction(() => {
-      insertGame(deps.db, createdGame, input.statusId, replyVisibility);
+      insertGame(deps.db, { ...game, status: "CREATED" }, input.statusId, replyVisibility);
       for (const p of players) insertPlayer(deps.db, game.id, p);
     })();
     persisted = true;
 
-    const rootReplyId = await reply(
-      deps,
-      input.statusId,
-      m().gameCreated(game.theme, game.playlistLength, players.length, deadline, game.id),
-      replyVisibility,
-      { idempotencyKey: `pb:v1:creation:${input.statusId}:root` },
-    );
-    if (!saveGame(deps.db, { ...createdGame, threadRootId: rootReplyId }, "CREATED")) {
-      return { handled: true, kind: "game_created", detail: createdGame.id };
-    }
-
-    for (const p of players.filter((x) => x.inviteStatus === "pending")) {
-      const hostAcct = players.find((x) => x.role === "host")?.acct ?? "?";
-      const inviteText = m().inviteDm(game.theme, hostAcct, game.playlistLength, deadline);
-      await dmTo(
-        deps,
-        p.accountId,
-        inviteText,
-        p.acct,
-        { idempotencyKey: `pb:v1:creation:${game.id}:invite:${p.accountId}` },
-      );
-      deps.db
-        .prepare("UPDATE players SET invite_sent_at = ? WHERE game_id = ? AND account_id = ?")
-        .run(deps.now().toISOString(), game.id, p.accountId);
-    }
-
-    saveGame(
-      deps.db,
-      {
-        ...createdGame,
-        status: "INVITED",
-        threadRootId: rootReplyId,
-        updatedAt: deps.now().toISOString(),
-      },
-      "CREATED",
-    );
-
+    await completeCreation(deps, game.id, input.statusId, replyVisibility);
     return { handled: true, kind: "game_created", detail: game.id };
   } catch (err) {
     if (persisted) {
-      deps.log?.("game creation side effect failed; retrying notification", {
-        statusId: input.statusId,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      deps.logger?.warn(
+        { statusId: input.statusId, err: errorText(err) },
+        "game creation side effect failed; retrying notification",
+      );
       throw err;
     }
-    deps.log?.("game creation failed", {
-      statusId: input.statusId,
-      err: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 5) : undefined,
-    });
+    deps.logger?.warn(
+      {
+        statusId: input.statusId,
+        err: errorText(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 5) : undefined,
+      },
+      "game creation failed",
+    );
     const msg =
       err instanceof ValidationError || err instanceof RateLimitedError
         ? err.message
@@ -336,7 +275,7 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
   }
 }
 
-async function handleStatus(input: CommandInput, deps: HandlerDeps, _text: string): Promise<HandlerResult> {
+async function handleStatus(input: CommandInput, deps: HandlerDeps): Promise<HandlerResult> {
   const replyVisibility = input.visibility ?? "public";
   // Find most recent open game involving this account
   const row = deps.db
@@ -357,11 +296,11 @@ async function handleStatus(input: CommandInput, deps: HandlerDeps, _text: strin
   const statusLabel = m().gameStatus(game.status, game.currentRound, game.playlistLength);
   const playersStr = players.map((p) => `@${p.acct} ${m().statusPoints(p.points)}`).join(", ");
   const lines = [
-    m().statusLine(m().statusLabelStatus(), statusLabel),
-    m().statusLine(m().statusLabelTheme(), game.theme),
-    m().statusLine(m().statusLabelPot(), String(game.pot)),
-    m().statusLine(m().statusLabelPlayers(), playersStr),
-    m().statusLine(m().statusLabelGameId(), game.id),
+    `${m().statusLabelStatus()}: ${statusLabel}`,
+    `${m().statusLabelTheme()}: ${game.theme}`,
+    `${m().statusLabelPot()}: ${game.pot}`,
+    `${m().statusLabelPlayers()}: ${playersStr}`,
+    `${m().statusLabelGameId()}: ${game.id}`,
   ];
   await reply(deps, input.statusId, lines.join("\n"), replyVisibility);
   return { handled: true, kind: "status", detail: game.id };
@@ -371,44 +310,35 @@ async function handleStatus(input: CommandInput, deps: HandlerDeps, _text: strin
 
 export async function handleDm(input: CommandInput, deps: HandlerDeps): Promise<HandlerResult> {
   const text = htmlToText(input.content);
-  const reply_ = parseDmReply(text);
+  const parsed = parseDmReply(text);
 
-  if (reply_.kind === "accept" || reply_.kind === "decline") {
-    return handleInviteResponse(input, deps, reply_.kind);
-  }
-
-  if (reply_.kind === "links") {
-    return handleLinkSubmission(input, deps, reply_.urls);
-  }
-
-  if (reply_.kind === "cancel") {
-    return handleCancel(input, deps);
-  }
-
-  if (reply_.kind === "replace") {
-    return handleReplace(input, deps, reply_.position, reply_.url);
+  switch (parsed.kind) {
+    case "accept":
+    case "decline":
+      return handleInviteResponse(input, deps, parsed.kind);
+    case "links":
+      return handleLinkSubmission(input, deps, parsed.urls);
+    case "cancel":
+      return handleCancel(input, deps);
+    case "replace":
+      return handleReplace(input, deps, parsed.position, parsed.url);
   }
 
   deps.logger?.debug(
     { accountId: input.accountId, text: text.slice(0, 200) },
     "unrecognized DM text",
   );
-  await dmTo(
-    deps,
-    input.accountId,
-    m().unknownDm(deps.botAcct),
-    input.accountAcct,
-  );
+  await dm(deps, input.accountId, m().unknownDm(deps.botAcct), input.accountAcct);
   return { handled: true, kind: "unknown" };
 }
 
 /**
  * RULES §4/§6: the host voids an open game by DM — no champion, no pot, scores
- * stay as historical record. The state machine owns which states may close
- * (`sourceStatuses("CANCEL")`), so anything else reads as "nothing to cancel".
+ * stay as historical record. `CLOSURES.CANCEL` owns which states may close, so
+ * anything else reads as "nothing to cancel".
  */
 async function handleCancel(input: CommandInput, deps: HandlerDeps): Promise<HandlerResult> {
-  const cancellable = sourceStatuses("CANCEL");
+  const cancellable = CLOSURES.CANCEL.from;
   const row = deps.db
     .prepare(
       `SELECT g.id FROM games g JOIN players p ON p.game_id = g.id
@@ -420,18 +350,19 @@ async function handleCancel(input: CommandInput, deps: HandlerDeps): Promise<Han
 
   const cancelled = row ? await voidOpenGame(deps, row.id, "CANCEL") : null;
   if (!cancelled) {
-    await dmTo(deps, input.accountId, m().cancelNothing(), input.accountAcct);
+    await dm(deps, input.accountId, m().cancelNothing(), input.accountAcct);
     return { handled: true, kind: "cancel_rejected", detail: "no cancellable game" };
   }
 
-  await dmTo(deps, input.accountId, m().cancelDone(cancelled.theme), input.accountAcct);
+  await dm(deps, input.accountId, m().cancelDone(cancelled.theme), input.accountAcct);
   return { handled: true, kind: "game_cancelled", detail: cancelled.id };
 }
 
-async function findInvitationGame(
+async function handleInviteResponse(
+  input: CommandInput,
   deps: HandlerDeps,
-  accountId: string,
-): Promise<{ game: Game; players: Player[] } | null> {
+  decision: "accept" | "decline",
+): Promise<HandlerResult> {
   // Pending invites remain valid during INVITED and after the first accept (COLLECTING),
   // until the acceptance window closes — checked in-SQL so a DM landing after
   // the deadline (but before the 60s sweep expires the invite) can't sneak in.
@@ -442,68 +373,56 @@ async function findInvitationGame(
          AND (g.acceptance_deadline IS NULL OR g.acceptance_deadline > ?)
        ORDER BY g.created_at DESC LIMIT 1`,
     )
-    .get(accountId, deps.now().toISOString()) as { id: string } | undefined;
-  if (!row) return null;
-  return { game: loadGame(deps.db, row.id)!, players: loadPlayers(deps.db, row.id) };
-}
-
-async function handleInviteResponse(
-  input: CommandInput,
-  deps: HandlerDeps,
-  decision: "accept" | "decline",
-): Promise<HandlerResult> {
-  const found = await findInvitationGame(deps, input.accountId);
-  if (!found) {
-    await dmTo(deps, input.accountId, m().noInvitation(), input.accountAcct);
+    .get(input.accountId, deps.now().toISOString()) as { id: string } | undefined;
+  if (!row) {
+    await dm(deps, input.accountId, m().noInvitation(), input.accountAcct);
     return { handled: true, kind: "no_invitation" };
   }
 
-    const { game, players } = found;
-    try {
-      if (decision === "accept") {
-        const otherGames = openGamesForAccount(deps.db, input.accountId)
-          .filter((open) => open.id !== game.id);
-        if (otherGames.length >= deps.maxGamesPerPlayer) {
-          throw new ValidationError(
-            m().errConcurrentGames(otherGames.length + 1, deps.maxGamesPerPlayer),
-          );
-        }
+  const game = loadGame(deps.db, row.id)!;
+  const players = loadPlayers(deps.db, row.id);
+  try {
+    if (decision === "accept") {
+      const otherGames = openGamesForAccount(deps.db, input.accountId)
+        .filter((open) => open.id !== game.id);
+      if (otherGames.length >= deps.maxGamesPerPlayer) {
+        throw new ValidationError(
+          m().errConcurrentGames(otherGames.length + 1, deps.maxGamesPerPlayer),
+        );
       }
-      const ts = deps.now().toISOString();
-      const result =
-        decision === "accept"
-          ? acceptInvite(game, players, input.accountId, deps.now())
-          : declineInvite(game, players, input.accountId);
-      const firstAccept = "firstAccept" in result ? result.firstAccept : false;
-      const submissionDeadline = firstAccept
-        ? new Date(deps.now().getTime() + deps.submissionWindowSec * 1000).toISOString()
-        : result.game.submissionDeadline;
+    }
+    const result =
+      decision === "accept"
+        ? acceptInvite(game, players, input.accountId, deps.now())
+        : declineInvite(game, players, input.accountId);
+    const firstAccept = "firstAccept" in result && result.firstAccept;
+    const submissionDeadline = firstAccept
+      ? new Date(deps.now().getTime() + deps.submissionWindowSec * 1000).toISOString()
+      : result.game.submissionDeadline;
 
-      deps.db.transaction(() => {
-        for (const p of result.players) savePlayer(deps.db, game.id, p);
-        if (!saveGame(deps.db, { ...result.game, submissionDeadline, updatedAt: ts }, game.status)) {
-          throw new Error("Game changed while processing invitation");
-        }
-      })();
+    const updated = { ...result.game, submissionDeadline, updatedAt: deps.now().toISOString() };
+    if (!saveGameState(deps.db, updated, result.players, game.status)) {
+      throw new Error("Game changed while processing invitation");
+    }
 
-      if (decision === "decline") {
-        await dmTo(deps, input.accountId, m().declined());
-        return { handled: true, kind: "declined" };
+    if (decision === "decline") {
+      await dm(deps, input.accountId, m().declined());
+      return { handled: true, kind: "declined" };
+    }
+
+    await dm(deps, input.accountId, m().youAreIn());
+
+    if (firstAccept) {
+      // `result.players` is exactly what was just persisted, so the prompts go to
+      // everyone now accepted without re-reading the table.
+      for (const p of result.players.filter((x) => x.inviteStatus === "accepted")) {
+        await dm(deps, p.accountId, m().submitFirst(game.playlistLength));
       }
-
-      await dmTo(deps, input.accountId, m().youAreIn());
-
-      if (firstAccept) {
-        const fresh = loadPlayers(deps.db, game.id);
-        const freshGame = loadGame(deps.db, game.id)!;
-        for (const p of fresh.filter((x) => x.inviteStatus === "accepted")) {
-          await dmTo(deps, p.accountId, m().submitFirst(freshGame.playlistLength));
-        }
-      }
-      return { handled: true, kind: "accepted", detail: firstAccept ? "first" : "subsequent" };
-    } catch (err) {
+    }
+    return { handled: true, kind: "accepted", detail: firstAccept ? "first" : "subsequent" };
+  } catch (err) {
     const msg = err instanceof ValidationError ? err.message : m().invitationError();
-    await dmTo(deps, input.accountId, msg);
+    await dm(deps, input.accountId, msg);
     return { handled: true, kind: "error", detail: msg };
   }
 }
@@ -513,31 +432,12 @@ async function handleLinkSubmission(
   deps: HandlerDeps,
   urls: string[],
 ): Promise<HandlerResult> {
-  const selection = selectReplacementWindow(
-    replacementWindows(deps, input.accountId),
-    input.inReplyToId,
-  );
-  if (selection.ambiguous) {
-    await dmTo(deps, input.accountId, m().errReplacementAmbiguous(), input.accountAcct);
-    return { handled: true, kind: "replace_rejected", detail: "ambiguous replacement window" };
-  }
-  if (selection.window) {
-    const result = await swapTune(
-      input,
-      deps,
-      selection.window.game,
-      selection.window.position,
-      urls[0]!,
-    );
-    if (result.kind === "tune_replaced") {
-      await emitRound(deps, selection.window.game.id, selection.window.position);
-    }
-    return result;
-  }
+  const replaced = await replaceInWindow(input, deps, urls[0]!);
+  if (replaced) return replaced;
 
   const game = findCollectingGame(deps, input.accountId);
   if (!game) {
-    await dmTo(deps, input.accountId, m().noCollecting(), input.accountAcct);
+    await dm(deps, input.accountId, m().noCollecting(), input.accountAcct);
     return { handled: true, kind: "no_collecting_game" };
   }
 
@@ -568,14 +468,16 @@ async function handleLinkSubmission(
       const withTune = submitTune(game, players, tunes, input.accountId, resolved, m(), deps.now());
       const added = withTune[withTune.length - 1]!;
       insertTune(deps.db, game.id, added);
-      tunes = loadTunes(deps.db, game.id);
+      // The engine's array is this player's authoritative playlist; re-reading it
+      // would only re-fetch what is already here.
+      tunes = withTune;
       accepted += 1;
       const mine = tunes.filter((t) => t.accountId === input.accountId).length;
       const msg =
         mine >= game.playlistLength
           ? m().tuneAcceptedComplete(added.position, game.playlistLength, resolved.title)
           : m().tuneAcceptedMore(added.position, game.playlistLength, resolved.title, mine + 1);
-      await dmTo(deps, input.accountId, msg);
+      await dm(deps, input.accountId, msg);
     } catch (err) {
       if (err instanceof ValidationError) {
         lastError = err.message;
@@ -583,8 +485,8 @@ async function handleLinkSubmission(
       } else {
         // Never DM internals (oEmbed/SQLite text): log them instead.
         lastError = m().resolveVideoError();
-        lastDetail = err instanceof Error ? err.message : String(err);
-        deps.log?.("tune submission failed", { videoId, err: lastDetail });
+        lastDetail = errorText(err);
+        deps.logger?.warn({ videoId, err: lastDetail }, "tune submission failed");
       }
     }
   }
@@ -595,7 +497,7 @@ async function handleLinkSubmission(
     return { handled: true, kind: "tune_accepted", detail: { accepted, lastError: lastDetail } };
   }
 
-  await dmTo(deps, input.accountId, lastError ?? m().linkRejected());
+  await dm(deps, input.accountId, lastError ?? m().linkRejected());
   return { handled: true, kind: "tune_rejected", detail: lastDetail };
 }
 
@@ -612,55 +514,61 @@ function findCollectingGame(deps: HandlerDeps, accountId: string): Game | null {
   return row ? loadGame(deps.db, row.id) : null;
 }
 
-type ReplacementWindow = { game: Game; position: number; promptStatusId: string | null };
+/** The round's replacement deadline while its window is open (v1.1 1.4), else null. */
+function openReplacementDeadline(deps: HandlerDeps, game: Game): string | null {
+  const round = loadRound(deps.db, game.id, game.currentRound);
+  const meta = roundMeta(round);
+  const deadline = meta.replacement?.deadline;
+  if (round?.status !== "announced" || meta.publishing || !deadline) return null;
+  return deps.now().getTime() < new Date(deadline).getTime() ? deadline : null;
+}
 
-type ReplacementSelection = { window: ReplacementWindow | null; ambiguous: boolean };
-
-function replacementWindows(deps: HandlerDeps, accountId: string): ReplacementWindow[] {
+/**
+ * Route a link into the player's open round-replacement window, if any.
+ * Returns null when no window applies (the caller falls back to collection).
+ * `position` (from `replace <n> <url>`) must name the window's round.
+ */
+async function replaceInWindow(
+  input: CommandInput,
+  deps: HandlerDeps,
+  url: string,
+  position?: number,
+): Promise<HandlerResult | null> {
   const rows = deps.db
     .prepare(
       `SELECT g.id FROM games g JOIN players p ON p.game_id = g.id
        WHERE p.account_id = ? AND p.invite_status = 'accepted' AND g.status = 'ROUND'
        ORDER BY g.created_at ASC, g.id ASC`,
     )
-    .all(accountId) as { id: string }[];
-  const windows: ReplacementWindow[] = [];
+    .all(input.accountId) as { id: string }[];
+  const windows: { game: Game; promptStatusId: string | null }[] = [];
   for (const { id } of rows) {
     const game = loadGame(deps.db, id);
-    if (!game) continue;
-    const round = loadRound(deps.db, game.id, game.currentRound);
-    const meta = roundMeta(round);
-    const deadline = meta.replacement?.deadline;
-    if (round?.status !== "announced" || meta.publishing) continue;
-    if (!deadline || deps.now().getTime() >= new Date(deadline).getTime()) continue;
+    if (!game || !openReplacementDeadline(deps, game)) continue;
     const tunes = loadTunes(deps.db, game.id);
-    if (!tunes.some((t) => t.accountId === accountId && t.position === game.currentRound)) continue;
-    windows.push({
-      game,
-      position: game.currentRound,
-      promptStatusId: meta.replacement?.prompts?.[accountId] ?? null,
-    });
+    if (!tunes.some((t) => t.accountId === input.accountId && t.position === game.currentRound)) continue;
+    const meta = roundMeta(loadRound(deps.db, game.id, game.currentRound));
+    windows.push({ game, promptStatusId: meta.replacement?.prompts?.[input.accountId] ?? null });
   }
-  return windows;
-}
 
-function selectReplacementWindow(
-  windows: ReplacementWindow[],
-  inReplyToId: string | null,
-): ReplacementSelection {
-  if (inReplyToId) {
-    const matches = windows.filter((window) => window.promptStatusId === inReplyToId);
-    return { window: matches.length === 1 ? matches[0]! : null, ambiguous: matches.length !== 1 };
+  // A reply to a replacement prompt picks that game; otherwise only an unambiguous window applies.
+  const candidates = input.inReplyToId
+    ? windows.filter((w) => w.promptStatusId === input.inReplyToId)
+    : windows;
+  if (input.inReplyToId ? candidates.length !== 1 : candidates.length > 1) {
+    await dm(deps, input.accountId, m().errReplacementAmbiguous(), input.accountAcct);
+    return { handled: true, kind: "replace_rejected", detail: "ambiguous replacement window" };
   }
-  return {
-    window: windows.length === 1 ? windows[0]! : null,
-    ambiguous: windows.length > 1,
-  };
+  const game = candidates[0]?.game;
+  if (!game) return null;
+  if (position !== undefined && position !== game.currentRound) {
+    await dm(deps, input.accountId, m().errReplaceWindowOnly(game.currentRound), input.accountAcct);
+    return { handled: true, kind: "replace_rejected", detail: "position outside the open window" };
+  }
+  const result = await swapTune(input, deps, game, game.currentRound, url);
+  if (result.kind === "tune_replaced") await emitRound(deps, game.id, game.currentRound);
+  return result;
 }
-
-type SwapResult =
-  | { handled: true; kind: "tune_replaced"; detail: { position: number; videoId: string } }
-  | { handled: true; kind: "replace_rejected"; detail: string };
 
 /** Swap the tune at `position` for the video in `url` (shared by both replace paths). */
 async function swapTune(
@@ -669,39 +577,33 @@ async function swapTune(
   game: Game,
   position: number,
   url: string,
-): Promise<SwapResult> {
+): Promise<Handled> {
+  const reject = async (text: string, detail: string): Promise<Handled> => {
+    await dm(deps, input.accountId, text, input.accountAcct);
+    return { handled: true, kind: "replace_rejected", detail };
+  };
   const videoId = extractVideoId(url);
-  if (!videoId) {
-    await dmTo(deps, input.accountId, m().notPlayable(url), input.accountAcct);
-    return { handled: true, kind: "replace_rejected", detail: "not playable" };
-  }
+  if (!videoId) return reject(m().notPlayable(url), "not playable");
 
   const mine = loadTunes(deps.db, game.id).filter((t) => t.accountId === input.accountId);
   if (!mine.some((t) => t.position === position)) {
-    await dmTo(deps, input.accountId, m().errReplaceMissing(position), input.accountAcct);
-    return { handled: true, kind: "replace_rejected", detail: "no tune at position" };
+    return reject(m().errReplaceMissing(position), "no tune at position");
   }
   if (mine.some((t) => t.videoId === videoId && t.position !== position)) {
-    await dmTo(deps, input.accountId, m().alreadyInPlaylist(), input.accountAcct);
-    return { handled: true, kind: "replace_rejected", detail: "duplicate" };
+    return reject(m().alreadyInPlaylist(), "duplicate");
   }
 
   try {
     const resolved = await deps.resolveTitle(videoId);
-    const currentGame = loadGame(deps.db, game.id);
-    const currentRound = currentGame?.status === "ROUND" && currentGame.currentRound === position
-      ? loadRound(deps.db, game.id, position)
-      : undefined;
-    const replacementStillOpen = currentRound?.status === "announced" &&
-      !roundMeta(currentRound).publishing &&
-      !!roundMeta(currentRound).replacement?.deadline &&
-      deps.now().getTime() < new Date(roundMeta(currentRound).replacement!.deadline!).getTime();
-    const collectingStillOpen = currentGame?.status === "COLLECTING" &&
-      !!currentGame.submissionDeadline &&
-      deps.now().getTime() < new Date(currentGame.submissionDeadline).getTime();
+    const current = loadGame(deps.db, game.id);
+    const replacementStillOpen = current?.status === "ROUND" &&
+      current.currentRound === position &&
+      openReplacementDeadline(deps, current) !== null;
+    const collectingStillOpen = current?.status === "COLLECTING" &&
+      !!current.submissionDeadline &&
+      deps.now().getTime() < new Date(current.submissionDeadline).getTime();
     if (!replacementStillOpen && !collectingStillOpen) {
-      await dmTo(deps, input.accountId, m().errNotCollecting(), input.accountAcct);
-      return { handled: true, kind: "replace_rejected", detail: "window closed" };
+      return reject(m().errNotCollecting(), "window closed");
     }
     deps.db
       .prepare(
@@ -709,7 +611,7 @@ async function swapTune(
          WHERE game_id = ? AND account_id = ? AND position = ?`,
       )
       .run(resolved.videoId, resolved.title, resolved.canonicalUrl, game.id, input.accountId, position);
-    await dmTo(
+    await dm(
       deps,
       input.accountId,
       m().tuneReplaced(position, game.playlistLength, resolved.title),
@@ -717,10 +619,9 @@ async function swapTune(
     );
     return { handled: true, kind: "tune_replaced", detail: { position, videoId: resolved.videoId } };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    deps.log?.("tune replacement failed", { videoId, position, err: detail });
-    await dmTo(deps, input.accountId, m().resolveVideoError(), input.accountAcct);
-    return { handled: true, kind: "replace_rejected", detail };
+    const detail = errorText(err);
+    deps.logger?.warn({ videoId, position, err: detail }, "tune replacement failed");
+    return reject(m().resolveVideoError(), detail);
   }
 }
 
@@ -736,89 +637,44 @@ async function handleReplace(
   position: number,
   url: string,
 ): Promise<HandlerResult> {
-  const selection = selectReplacementWindow(
-    replacementWindows(deps, input.accountId),
-    input.inReplyToId,
-  );
-  if (selection.ambiguous) {
-    await dmTo(deps, input.accountId, m().errReplacementAmbiguous(), input.accountAcct);
-    return { handled: true, kind: "replace_rejected", detail: "ambiguous replacement window" };
-  }
-  if (selection.window) {
-    if (position !== selection.window.position) {
-      await dmTo(
-        deps,
-        input.accountId,
-        m().errReplaceWindowOnly(selection.window.position),
-        input.accountAcct,
-      );
-      return { handled: true, kind: "replace_rejected", detail: "position outside the open window" };
-    }
-    const result = await swapTune(input, deps, selection.window.game, position, url);
-    if (result.kind === "tune_replaced") {
-      await emitRound(deps, selection.window.game.id, position);
-    }
-    return result;
-  }
+  const replaced = await replaceInWindow(input, deps, url, position);
+  if (replaced) return replaced;
 
   const collecting = findCollectingGame(deps, input.accountId);
-  if (collecting) {
-    if (position < 1 || position > collecting.playlistLength) {
-      await dmTo(
-        deps,
-        input.accountId,
-        m().errReplacePosition(collecting.playlistLength),
-        input.accountAcct,
-      );
-      return { handled: true, kind: "replace_rejected", detail: "position out of range" };
-    }
-    return swapTune(input, deps, collecting, position, url);
+  if (!collecting) {
+    await dm(deps, input.accountId, m().errNotCollecting(), input.accountAcct);
+    return { handled: true, kind: "replace_rejected", detail: "not collecting" };
   }
-
-  await dmTo(deps, input.accountId, m().errNotCollecting(), input.accountAcct);
-  return { handled: true, kind: "replace_rejected", detail: "not collecting" };
+  if (position < 1 || position > collecting.playlistLength) {
+    await dm(deps, input.accountId, m().errReplacePosition(collecting.playlistLength), input.accountAcct);
+    return { handled: true, kind: "replace_rejected", detail: "position out of range" };
+  }
+  return swapTune(input, deps, collecting, position, url);
 }
 
-async function maybeAdvanceToReady(deps: HandlerDeps, gameId: string): Promise<boolean> {
+async function maybeAdvanceToReady(deps: HandlerDeps, gameId: string): Promise<void> {
   const game = loadGame(deps.db, gameId)!;
   const players = loadPlayers(deps.db, gameId).filter((p) => p.inviteStatus === "accepted");
   const tunes = loadTunes(deps.db, gameId);
   const allComplete = players.every(
     (p) => tunes.filter((t) => t.accountId === p.accountId).length >= game.playlistLength,
   );
-  if (!allComplete || players.length < 2) return false;
+  if (!allComplete || players.length < 2) return;
 
-  const finalized = finalizeCollection(
-    game,
-    players,
-    tunes,
-    game.playlistLength,
-    deps.now(),
-  );
-  const finalizedSaved = deps.db.transaction(() => {
-    if (!saveGame(deps.db, finalized.game, "COLLECTING")) return false;
-    for (const p of finalized.players) savePlayer(deps.db, gameId, p);
-    return true;
-  })();
-  if (!finalizedSaved) return false;
-
-  if (finalized.outcome !== "ready") return false;
+  const finalized = finalizeCollection(game, players, tunes, game.playlistLength, deps.now());
+  if (!saveGameState(deps.db, finalized.game, finalized.players, "COLLECTING")) return;
+  if (finalized.outcome !== "ready") return;
 
   // READY → start round 1
-  const readyGame = loadGame(deps.db, gameId)!;
-  const started = startRound(readyGame, 1, deps.now());
-  if (!saveGame(deps.db, started, "READY")) return false;
+  const started = startRound(finalized.game, 1, deps.now());
+  if (!saveGame(deps.db, started, "READY")) return;
 
   // Post duel announcement on creation thread
-  const rootId = started.threadRootId ?? started.id;
-  const freshPlayers = loadPlayers(deps.db, gameId);
-  const playingCount = freshPlayers.filter((p) => p.inviteStatus === "accepted").length;
-  const text = m().duelStart(started.theme, started.playlistLength, playingCount);
-  await reply(deps, rootId, text);
+  const text = m().duelStart(started.theme, started.playlistLength, players.length);
+  await reply(deps, started.threadRootId ?? started.id, text);
 
   // Emit Round 1 posts (announce → tunes → poll), with auto-tie short-circuit
   await emitRound(deps, gameId, 1);
-  return true;
 }
 
 // ── notification ingestion ──────────────────────────────────
@@ -831,10 +687,7 @@ function isRateLimitNotificationError(err: unknown): boolean {
 
 function isRetryableNotificationError(err: unknown): boolean {
   if (err instanceof ValidationError) return false;
-  if (isRateLimitNotificationError(err)) return true;
-  if (err instanceof RateLimitedError || err instanceof MastodonApiError) {
-    return err instanceof RateLimitedError || err.status === 408 || err.status >= 500;
-  }
+  if (err instanceof MastodonApiError) return err.status === 429 || err.status === 408 || err.status >= 500;
   return true;
 }
 
@@ -856,69 +709,34 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
   const claim = deps.db
     .prepare("INSERT OR IGNORE INTO processed_notifications (notification_id, processed_at) VALUES (?, '')")
     .run(n.id);
+  const logContext = {
+    notificationId: n.id,
+    kind: classified.kind,
+    from: "accountAcct" in classified ? classified.accountAcct : undefined,
+  };
   if (claim.changes === 0) {
-    deps.logger?.debug(
-      { notificationId: n.id, kind: classified.kind },
-      "notification skipped: already claimed or processed",
-    );
+    deps.logger?.debug(logContext, "notification skipped: already claimed or processed");
     return;
   }
-
-  deps.logger?.debug(
-    {
-      notificationId: n.id,
-      kind: classified.kind,
-      ...(classified.kind !== "poll_expired" ? { from: classified.accountAcct } : {}),
-    },
-    "notification claimed",
-  );
+  deps.logger?.debug(logContext, "notification claimed");
 
   try {
     let result: HandlerResult;
-    if (classified.kind === "public_command") {
-      result = await handlePublicCommand(
-        {
-          accountId: classified.accountId,
-          accountAcct: classified.accountAcct,
-          statusId: classified.statusId,
-          content: classified.content,
-          inReplyToId: classified.inReplyToId,
-          visibility: classified.visibility,
-        },
-        deps,
-      );
-    } else if (classified.kind === "dm") {
-      result = await handleDm(
-        {
-          accountId: classified.accountId,
-          accountAcct: classified.accountAcct,
-          statusId: classified.statusId,
-          content: classified.content,
-          inReplyToId: classified.inReplyToId,
-        },
-        deps,
-      );
-    } else {
+    if (classified.kind === "poll_expired") {
       await deps.onPollExpired?.(classified.statusId);
       result = { handled: true, kind: "poll_expired" };
+    } else {
+      result = await (classified.kind === "dm" ? handleDm : handlePublicCommand)(classified, deps);
     }
 
-    deps.logger?.info(
-      {
-        notificationId: n.id,
-        kind: classified.kind,
-        ...(classified.kind !== "poll_expired" ? { from: classified.accountAcct } : {}),
-        result,
-      },
-      "notification handled",
-    );
+    deps.logger?.info({ ...logContext, result }, "notification handled");
 
     clearNotificationFailure(deps.db, n.id);
     deps.db
       .prepare("UPDATE processed_notifications SET processed_at = ? WHERE notification_id = ?")
       .run(deps.now().toISOString(), n.id);
   } catch (err) {
-    const errorText = err instanceof Error ? err.message : String(err);
+    const message = errorText(err);
     const rateLimited = isRateLimitNotificationError(err);
     let attemptCount = 1;
     if (rateLimited) {
@@ -935,14 +753,14 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
     }
     const deadLettered = !isRetryableNotificationError(err) ||
       (attemptCount >= POISON_ATTEMPTS && !rateLimited);
-    const nextAttemptAt = rateLimited && err instanceof RateLimitError
+    const nextAttemptAt = err instanceof RateLimitError
       ? new Date(err.resetAt * 1000).toISOString()
       : null;
     recordNotificationFailure(
       deps.db,
       n.id,
       attemptCount,
-      errorText,
+      message,
       nextAttemptAt,
       deadLettered ? deps.now().toISOString() : null,
     );
@@ -950,30 +768,14 @@ export async function processNotification(n: RawNotification, deps: HandlerDeps)
       deps.db
         .prepare("UPDATE processed_notifications SET processed_at = 'error', attempts = ? WHERE notification_id = ?")
         .run(attemptCount, n.id);
-      deps.log?.("notification moved to dead letter", {
-        notificationId: n.id,
-        attempts: attemptCount,
-        err: errorText,
-      });
-      deps.logger?.error(
-        { notificationId: n.id, kind: classified.kind, attempts: attemptCount, err: errorText },
-        "notification dead-lettered",
-      );
+      deps.logger?.error({ ...logContext, attempts: attemptCount, err: message }, "notification dead-lettered");
       return;
     }
     deps.logger?.warn(
-      {
-        notificationId: n.id,
-        kind: classified.kind,
-        attempts: attemptCount,
-        rateLimited,
-        err: errorText,
-      },
+      { ...logContext, attempts: attemptCount, rateLimited, err: message },
       "notification failed; will retry",
     );
     deps.db.prepare("DELETE FROM processed_notifications WHERE notification_id = ?").run(n.id);
     throw err;
   }
 }
-
-// ── notification ingestion ──────────────────────────────────

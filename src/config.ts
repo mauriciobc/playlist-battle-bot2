@@ -5,31 +5,21 @@ import type { PlaylistPrivacy } from "./youtube/ytmusic.js";
 const POLL_MIN_SEC = 300;
 const POLL_MAX_SEC = 604800;
 
-/** Production loop cadence (seconds). */
-const LOOP_NOTIFICATION_SEC = 15;
-const LOOP_SCHEDULER_SEC = 60;
-const LOOP_RECOVERY_SEC = 300;
-
-/**
- * Test-mode loop cadence (seconds). The poll itself still has to be >= 300s
- * because Mastodon rejects shorter polls; rounds are shortened by resolving
- * stagnant polls early, not by asking Mastodon for an impossible poll.
- */
-const TEST_LOOP_NOTIFICATION_SEC = 5;
-const TEST_LOOP_SCHEDULER_SEC = 10;
-const TEST_LOOP_RECOVERY_SEC = 60;
-
-/**
- * E2E cadence: fast enough to keep a test suite moving, slow enough that an
- * external client can read a poll and cast a vote before the round is
- * resolved underneath it.
- */
-const E2E_LOOP_NOTIFICATION_SEC = 5;
-const E2E_LOOP_SCHEDULER_SEC = 10;
-const E2E_LOOP_RECOVERY_SEC = 30;
-
 /** Operating mode. See RUN_MODE. */
-export type RunMode = "production" | "e2e" | "test";
+type RunMode = "production" | "e2e" | "test";
+
+/**
+ * Loop cadence (seconds) per mode. The poll itself stays >= 300s in every
+ * mode because Mastodon rejects shorter polls; test modes shorten rounds by
+ * resolving stagnant polls early. E2E is fast enough to keep a suite moving,
+ * slow enough that an external client can read a poll and vote before the
+ * round is resolved underneath it.
+ */
+const LOOP_CADENCE_SEC: Record<RunMode, { notification: number; scheduler: number; recovery: number }> = {
+  production: { notification: 15, scheduler: 60, recovery: 300 },
+  e2e: { notification: 5, scheduler: 10, recovery: 30 },
+  test: { notification: 5, scheduler: 10, recovery: 60 },
+};
 
 const intFromEnv = (min: number, max?: number) =>
   z
@@ -43,16 +33,18 @@ const intFromEnv = (min: number, max?: number) =>
     );
 
 /** Log levels pino accepts; single source for schema validation and boot. */
-export const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace"] as const;
-export type LogLevel = (typeof LOG_LEVELS)[number];
+const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace"] as const;
 
-// Boolean env flags: "1"/"true" on, "0"/"false" off. The boot reader below
-// parses it through this same schema, so LOG_PRETTY cannot mean two things.
-const envFlag = z
-  .string()
-  .optional()
-  .default("0")
-  .transform((value) => value !== "0" && value.toLowerCase() !== "false");
+/**
+ * Boolean env flag: "0"/"false" off, anything else on. The boot reader below
+ * parses LOG_PRETTY through this same schema, so it cannot mean two things.
+ */
+const envFlag = (fallback: "0" | "1") =>
+  z
+    .string()
+    .optional()
+    .default(fallback)
+    .transform((value) => value !== "0" && value.toLowerCase() !== "false");
 
 /**
  * Log settings for the boot identity line. Deliberately tolerant: it runs
@@ -60,38 +52,34 @@ const envFlag = z
  * rather than throw or silence the line that identifies the running build.
  */
 export function readLogSettings(env: NodeJS.ProcessEnv = process.env): {
-  level: LogLevel;
+  level: (typeof LOG_LEVELS)[number];
   pretty: boolean;
 } {
   return {
     level: LOG_LEVELS.find((candidate) => candidate === env.LOG_LEVEL) ?? "info",
-    pretty: envFlag.parse(env.LOG_PRETTY),
+    pretty: envFlag("0").parse(env.LOG_PRETTY),
   };
-}
-
-/** Loopback literals only - not 127.0.0.1.evil.com, not a LAN address. */
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
-
-function isLoopbackHost(hostname: string): boolean {
-  return LOOPBACK_HOSTS.has(hostname.toLowerCase().replace(/^\[|\]$/g, ""));
 }
 
 /**
  * The transport rule, applied after the schema parses so it can see RUN_MODE.
  *
- * https is always fine. Cleartext http is fine only for a loopback literal
- * and only outside production - the mock Mastodon the e2e harness runs
- * against is the one case that needs it. A LAN address or a public host over
- * http still fails, which is the whole point of the original rule.
+ * The bearer token must not cross a network in clear text, so https is always
+ * required — except for a loopback literal (not 127.0.0.1.evil.com, not a LAN
+ * address) outside production: the mock Mastodon the e2e harness runs against
+ * listens on 127.0.0.1.
  */
-export function assertMastodonTransport(
-  url: string,
-  mode: string | undefined,
-): void {
+function assertMastodonTransport(url: string, mode: RunMode): void {
   if (url.startsWith("https://")) return;
+  let hostname = "";
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    // Unparsable → not loopback.
+  }
   const cleartextOk =
     !url.startsWith("http://") ||
-    (mode !== "production" && isLoopbackHost(safeHostname(url)));
+    (mode !== "production" && ["127.0.0.1", "localhost", "::1"].includes(hostname));
   if (!cleartextOk) {
     throw new Error(
       "Invalid configuration: MASTODON_URL: must be an https URL (cleartext " +
@@ -100,25 +88,7 @@ export function assertMastodonTransport(
   }
 }
 
-function safeHostname(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return "";
-  }
-}
-
 const envSchema = z.object({
-  /**
-   * https, always - except a cleartext loopback URL outside production.
-   *
-   * The bearer token must not cross a network in clear text, which is why
-   * this has been https-only. The mock Mastodon used by the e2e harness
-   * listens on 127.0.0.1, so that one case needs http. The exception is
-   * deliberately narrow: the host must be a loopback literal, and production
-   * is excluded, so a non-loopback http URL - a LAN address, a public host -
-   * still fails in every mode.
-   */
   MASTODON_URL: z.string().url(),
   MASTODON_TOKEN: z.string().min(1, "required"),
   BOT_ACCT: z
@@ -141,11 +111,7 @@ const envSchema = z.object({
 
   // Stagnation early close: resolve a still-open poll before Mastodon expires
   // it once votes stop changing (requires visible tallies, i.e. hide_totals off).
-  EARLY_CLOSE_ENABLED: z
-    .string()
-    .optional()
-    .default("1")
-    .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
+  EARLY_CLOSE_ENABLED: envFlag("1"),
   EARLY_CLOSE_MIN_AGE_SEC: intFromEnv(0).default(300),
   EARLY_CLOSE_STAGNATION_SEC: intFromEnv(0).default(300),
 
@@ -172,19 +138,13 @@ const envSchema = z.object({
    *                 seconds. Fine for the bot's own unit tests, useless for
    *                 driving the real Mastodon API from outside.
    *
-   * The poll floor stays 300s in every mode: Mastodon rejects anything
-   * shorter. Modes control loop cadence and early close, never the poll.
+   * Modes control loop cadence and early close, never the poll floor.
    */
   RUN_MODE: z.enum(["production", "e2e", "test"]).optional(),
 
-  /**
-   * Compresses loop cadence and closes stagnant polls immediately so an
-   * end-to-end game finishes in minutes. Never changes the poll floor.
-   *
-   * @deprecated Use RUN_MODE. TEST_MODE=1 maps to RUN_MODE="test" and keeps
-   * its zeroed thresholds, so it is retained only for existing deployments.
-   */
-  TEST_MODE: envFlag,
+  // Legacy spelling still set in existing deployments' env files:
+  // TEST_MODE=1 (with no RUN_MODE) means RUN_MODE="test".
+  TEST_MODE: envFlag("0"),
 
   NOTIFICATION_INTERVAL_SEC: intFromEnv(1).optional(),
   SCHEDULER_INTERVAL_SEC: intFromEnv(1).optional(),
@@ -195,7 +155,7 @@ const envSchema = z.object({
   // values tolerantly, before validation, for the build-identity line.
   LOG_LEVEL: z.enum(LOG_LEVELS).default("info"),
   // Human-readable colorized logs (needs pino-pretty; JSON fallback otherwise).
-  LOG_PRETTY: envFlag,
+  LOG_PRETTY: envFlag("0"),
   LOCALE: z.enum(["en", "pt-BR"]).default("en"),
 });
 
@@ -215,16 +175,10 @@ export type BotConfig = {
   autoDeleteWindowHours: number;
   /** Effective operating mode. TEST_MODE is folded in at load time. */
   runMode: RunMode;
-  /** True only for "test". Kept for existing callers and diagnostics. */
-  testMode: boolean;
-  /** Loop cadences in seconds (config-facing). */
+  /** Loop cadences in seconds. */
   notificationIntervalSec: number;
   schedulerIntervalSec: number;
   recoveryIntervalSec: number;
-  /** Same cadences in milliseconds, for setInterval. */
-  notificationIntervalMs: number;
-  schedulerIntervalMs: number;
-  recoveryIntervalMs: number;
   /** Bot-account YT Music cookie; null → anonymous queue links only. */
   ytCookie: string | null;
   ytAuthUser: number;
@@ -262,8 +216,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   // RUN_MODE means production, and reading the raw value would let cleartext
   // loopback through by default.
   assertMastodonTransport(e.MASTODON_URL, runMode);
-  const isTestLike = runMode === "test";
-  const isE2e = runMode === "e2e";
+  const isTest = runMode === "test";
 
   // v1.1 §2.4: acceptance + submission + (N × (poll + replacement)) + scheduling overhead
   const worstCaseGameSec =
@@ -271,30 +224,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     e.SUBMISSION_WINDOW_SEC +
     (e.POLL_DURATION_SEC + e.REPLACEMENT_GRACE_MIN * 60) * MAX_PLAYLIST_LENGTH +
     e.POLL_DURATION_SEC * AUTO_DELETE_MARGIN_POLLS;
-  const windowSec = e.AUTO_DELETE_WINDOW_HOURS * 3600;
-  // windowSec === 0 means "unknown / no auto-delete" → not flagged as unsafe
-  const autoDeleteUnsafe =
-    e.AUTO_DELETE_WINDOW_HOURS > 0 && windowSec < worstCaseGameSec;
-
-  const defaultNotificationSec = isE2e
-    ? E2E_LOOP_NOTIFICATION_SEC
-    : isTestLike
-      ? TEST_LOOP_NOTIFICATION_SEC
-      : LOOP_NOTIFICATION_SEC;
-  const defaultSchedulerSec = isE2e
-    ? E2E_LOOP_SCHEDULER_SEC
-    : isTestLike
-      ? TEST_LOOP_SCHEDULER_SEC
-      : LOOP_SCHEDULER_SEC;
-  const defaultRecoverySec = isE2e
-    ? E2E_LOOP_RECOVERY_SEC
-    : isTestLike
-      ? TEST_LOOP_RECOVERY_SEC
-      : LOOP_RECOVERY_SEC;
-
-  const notificationSec = e.NOTIFICATION_INTERVAL_SEC ?? defaultNotificationSec;
-  const schedulerSec = e.SCHEDULER_INTERVAL_SEC ?? defaultSchedulerSec;
-  const recoverySec = e.RECOVERY_INTERVAL_SEC ?? defaultRecoverySec;
+  const cadence = LOOP_CADENCE_SEC[runMode];
 
   return {
     mastodonUrl: e.MASTODON_URL.replace(/\/+$/, ""),
@@ -306,30 +236,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     creationCooldownSec: e.CREATION_COOLDOWN_SEC,
     maxGamesPerPlayer: e.MAX_GAMES_PER_PLAYER,
     replacementGraceMin: e.REPLACEMENT_GRACE_MIN,
-    // EARLY_CLOSE_ENABLED stays operator-controlled in every mode.
-    //
-    // Only "test" collapses the thresholds to zero. This used to be keyed on
-    // TEST_MODE, which meant setting EARLY_CLOSE_MIN_AGE_SEC while TEST_MODE
-    // was on did nothing at all - the configured value was discarded. In
-    // "e2e" and "production" the operator's values are used as given, so a
-    // client has a real window to read a poll and vote.
+    // EARLY_CLOSE_ENABLED stays operator-controlled in every mode. Only "test"
+    // collapses the thresholds to zero; in "e2e" and "production" the
+    // operator's values are used as given, so a client has a real window to
+    // read a poll and vote.
     earlyCloseEnabled: e.EARLY_CLOSE_ENABLED,
-    earlyCloseMinAgeSec: isTestLike ? 0 : e.EARLY_CLOSE_MIN_AGE_SEC,
-    earlyCloseStagnationSec: isTestLike ? 0 : e.EARLY_CLOSE_STAGNATION_SEC,
+    earlyCloseMinAgeSec: isTest ? 0 : e.EARLY_CLOSE_MIN_AGE_SEC,
+    earlyCloseStagnationSec: isTest ? 0 : e.EARLY_CLOSE_STAGNATION_SEC,
     autoDeleteWindowHours: e.AUTO_DELETE_WINDOW_HOURS,
     runMode,
-    testMode: isTestLike,
-    notificationIntervalSec: notificationSec,
-    schedulerIntervalSec: schedulerSec,
-    recoveryIntervalSec: recoverySec,
-    notificationIntervalMs: notificationSec * 1000,
-    schedulerIntervalMs: schedulerSec * 1000,
-    recoveryIntervalMs: recoverySec * 1000,
-    ytCookie: e.YT_COOKIE?.trim() ? e.YT_COOKIE.trim() : null,
+    notificationIntervalSec: e.NOTIFICATION_INTERVAL_SEC ?? cadence.notification,
+    schedulerIntervalSec: e.SCHEDULER_INTERVAL_SEC ?? cadence.scheduler,
+    recoveryIntervalSec: e.RECOVERY_INTERVAL_SEC ?? cadence.recovery,
+    ytCookie: e.YT_COOKIE?.trim() || null,
     ytAuthUser: e.YT_AUTH_USER,
     ytPlaylistPrivacy: e.YT_PLAYLIST_PRIVACY,
     dbPath: e.DB_PATH,
     locale: e.LOCALE,
-    autoDeleteUnsafe,
+    // 0 means "unknown / no auto-delete" → never flagged as unsafe
+    autoDeleteUnsafe:
+      e.AUTO_DELETE_WINDOW_HOURS > 0 && e.AUTO_DELETE_WINDOW_HOURS * 3600 < worstCaseGameSec,
   };
 }

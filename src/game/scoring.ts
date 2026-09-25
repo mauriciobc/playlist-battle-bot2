@@ -5,11 +5,6 @@ import type { Player } from "./types.js";
  * Pure functions — no I/O.
  */
 
-export type StandingsEntry = {
-  accountId: string;
-  points: number;
-};
-
 /** Award poll tallies: every vote = 1 permanent point to that tune's player. */
 export function awardVotePoints(
   players: Player[],
@@ -81,20 +76,18 @@ export function splitPotAmong(
   };
 }
 
+/** Standings order: most points first, account ID breaks ties stably. */
+export function byStanding(a: Player, b: Player): number {
+  return b.points - a.points || a.accountId.localeCompare(b.accountId);
+}
+
 /**
  * Final standings: highest points wins; exact tie → shared championship (PRD §6).
  * Pot bonus is already included in points when awarded.
  */
-export function computeStandings(
-  players: Player[],
-): { champions: string[]; ordered: StandingsEntry[] } {
-  const ordered = [...players]
-    .map((p) => ({ accountId: p.accountId, points: p.points }))
-    .sort((a, b) => b.points - a.points || a.accountId.localeCompare(b.accountId));
-  if (ordered.length === 0) return { champions: [], ordered };
-  const topPoints = ordered[0]!.points;
-  const champions = ordered.filter((e) => e.points === topPoints).map((e) => e.accountId);
-  return { champions, ordered };
+export function champions(players: Player[]): string[] {
+  const top = Math.max(...players.map((p) => p.points));
+  return players.filter((p) => p.points === top).sort(byStanding).map((p) => p.accountId);
 }
 
 /**

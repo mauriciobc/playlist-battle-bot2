@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import type { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import { AUTH, jsonOf, post, postJson, startMock, type Json } from "../test/integration/mock-kit.js";
 
 /**
  * The driver's DM check reads /conversations, and it clears notifications
@@ -12,33 +13,10 @@ import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
  *   NotificationsController#clear - 422 with an empty array
  */
 
-const AUTH = { Authorization: "Bearer mock-token" };
-type Json = Record<string, unknown>;
-const jsonOf = async (res: Response) => (await res.json()) as Json;
-
-async function start() {
-  const server = new MockMastodonServer({
-    botAcct: "bot@mock.social",
-    hostAcct: "host@mock.social",
-    playerAcct: "player@mock.social",
-  });
-  await server.start();
-  return server;
-}
-
-async function post(server: MockMastodonServer, body: Json): Promise<Json> {
-  const res = await fetch(`${server.baseUrl}/api/v1/statuses`, {
-    method: "POST",
-    headers: { ...AUTH, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return jsonOf(res);
-}
-
 describe("MockMastodon: conversations", () => {
   let server: MockMastodonServer;
   beforeEach(async () => {
-    server = await start();
+    server = await startMock();
   });
 
   it("returns an array, empty when there is no direct message", async () => {
@@ -86,30 +64,22 @@ describe("MockMastodon: conversations", () => {
 describe("MockMastodon: clear notifications", () => {
   let server: MockMastodonServer;
   beforeEach(async () => {
-    server = await start();
+    server = await startMock();
   });
 
   it("accepts POST /notifications/clear and empties the queue", async () => {
     server.pushNotification({ type: "mention", fromAcct: "host@mock.social" });
-    const before = (
-      (await (
-        await fetch(`${server.baseUrl}/api/v1/notifications?limit=40`, { headers: AUTH })
-      ).json()) as Json[]
-    ).length;
-    expect(before).toBeGreaterThan(0);
+    const count = async () =>
+      (
+        (await (
+          await fetch(`${server.baseUrl}/api/v1/notifications?limit=40`, { headers: AUTH })
+        ).json()) as Json[]
+      ).length;
+    expect(await count()).toBeGreaterThan(0);
 
-    const res = await fetch(`${server.baseUrl}/api/v1/notifications/clear`, {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
+    const res = await postJson(server, "/api/v1/notifications/clear", {});
     expect(res.status).toBe(200);
 
-    const after = (
-      (await (
-        await fetch(`${server.baseUrl}/api/v1/notifications?limit=40`, { headers: AUTH })
-      ).json()) as Json[]
-    ).length;
-    expect(after).toBe(0);
+    expect(await count()).toBe(0);
   });
 });

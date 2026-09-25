@@ -8,28 +8,7 @@
  * hidden state beyond the set of polls already voted on.
  */
 
-export interface VoteState {
-  /** The poll id in hand right now, if the bot has an open one. */
-  pollId: string | null;
-  /** Pools this driver has already voted on. */
-  seen: Set<string>;
-}
-
-/**
- * True when this poll has not been voted on yet.
- *
- * The loop re-runs while it waits for the next round, so without this the
- * same poll gets voted on every pass and the tally inflates.
- */
-export function planVotes(pollId: string, _current: string | null, seen: Set<string>): boolean {
-  return !seen.has(pollId);
-}
-
-export function alreadyVotedOn(seen: Set<string>, pollId: string): boolean {
-  return seen.has(pollId);
-}
-
-export interface StopInput {
+interface StopInput {
   /** The bot has announced a finale, champion or verdict. */
   hasFinale: boolean;
   /** Round number currently in play. */
@@ -46,13 +25,11 @@ export interface StopInput {
  * early, and waiting for the announcement alone would hang on a game that
  * simply ran its course.
  */
-export function shouldStopVoting({ hasFinale, roundNumber, playlistLength }: StopInput): boolean {
-  if (hasFinale) return false;
-  if (roundNumber >= playlistLength) return false;
-  return true;
+export function keepVoting({ hasFinale, roundNumber, playlistLength }: StopInput): boolean {
+  return !(hasFinale || roundNumber >= playlistLength);
 }
 
-export interface Cast {
+interface Cast {
   label: string;
   choice: number;
 }

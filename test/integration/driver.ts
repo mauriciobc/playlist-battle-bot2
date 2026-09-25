@@ -14,18 +14,35 @@
  * report, not a way to make a phase pass.
  *
  * This is the Playwright model: poll the world, act on change.
+ *
+ * Drives one full game against a LIVE Mastodon instance: create, accept,
+ * submit, vote every round, finale. Config is read from ./.env in the working
+ * directory (see .env.example):
+ *
+ *   cd test/integration && cp .env.example .env   # fill in tokens
+ *   npx tsx driver.ts
+ *
+ * Against the mock Mastodon instead, see bot-against-mock.mts.
  */
 
 import { readFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { driverExitCode } from "./driver-exit.js";
-import { alreadyVotedOn, castPlan, shouldStopVoting } from "./vote-planner.js";
-import { resolveBaseUrl } from "./mastodon-helpers.js";
-import { openGames } from "../../src/game/types.js";
-import { isRefusal, isRefusalText, looksLikeAcceptance } from "./driver-replies.js";
-import {  MastodonAPI,
+import { castPlan, keepVoting } from "./vote-planner.js";
+import {
+  inRunGame,
+  isRefusalText,
+  looksLikeAcceptance,
+  looksLikeCreated,
+  looksLikeFinale,
+  looksLikeTuneRejection,
+} from "./driver-replies.js";
+import {
+  MastodonAPI,
   acctMatches,
-  qualifyAcct,
+  resolveBaseUrl,
   type MastodonPoll,
+  type MastodonStatus,
 } from "./mastodon-helpers.js";
 
 // ─── Config ────────────────────────────────────────────────────────────
@@ -34,7 +51,6 @@ interface Cfg {
   hostInstance: string;
   /** Resolved API origins. Explicit *_API_URL wins; else https://<instance>. */
   hostApiUrl: string;
-  botApiUrl: string;
   player1ApiUrl: string;
   hostToken: string;
   hostAcct: string;
@@ -105,26 +121,21 @@ function loadConfig(): Cfg {
   const n = (k: string, d: number) => Number(vals[k] || d);
   const split = (k: string) =>
     (vals[k] || "").split(",").map((s) => s.trim()).filter(Boolean);
-  // An empty array is truthy in JS, so check length - not truthiness.
-  const urls = (k: string) => {
-    const fromEnv = split(k);
-    return fromEnv.length > 0 ? fromEnv : FALLBACK_TUNES;
-  };
 
   // Both players must hold DIFFERENT videos in every round. If they share
-  // one, hasRoundCollision() (src/game/types.ts:125) treats the round as a
-  // tie and the bot never creates a poll - which is why every run finished
-  // auto_tied in seconds and the driver never got to vote. Rotating the
-  // fallback list by half its length pairs each round with a different video
-  // for the other player.
+  // one, hasRoundCollision() (src/game/types.ts) treats the round as a tie
+  // and the bot never creates a poll - which is why every run finished
+  // auto_tied in seconds and the driver never got to vote.
   //
-  // An explicit TUNE_URLS_PLAYER1 in the environment is trusted as-is: if
-  // it overlaps the host's list on purpose, that is the operator's call.
   // Deal alternately from one pool: even indices to the host, odd indices to
   // the player. No two players then hold the same video in the same round.
   // Slicing or rotating a single list cannot do this - it only reorders the
   // same URLs, so every round still collides and the bot auto-ties instead
-  // of polling (src/game/types.ts:125, hasRoundCollision).
+  // of polling.
+  //
+  // An explicit TUNE_URLS_PLAYER1 in the environment is trusted as-is, but
+  // an overlap with the host's list is refused below. An empty array is
+  // truthy in JS, so the env lists are checked by length, not truthiness.
   const envHost = split("TUNE_URLS_HOST");
   const envPlayer = split("TUNE_URLS_PLAYER1");
   const pool = envHost.length > 0 ? envHost : FALLBACK_TUNES;
@@ -147,7 +158,6 @@ function loadConfig(): Cfg {
     // Optional explicit origins. A bare host still resolves to https://<host>,
     // so the live runs take the same path as the mock ones.
     hostApiUrl: resolveBaseUrl(vals.HOST_API_URL, vals.HOST_INSTANCE || "mastodon.social"),
-    botApiUrl: resolveBaseUrl(vals.BOT_API_URL, vals.BOT_INSTANCE || "mastodon.social"),
     player1ApiUrl: resolveBaseUrl(
       vals.PLAYER1_API_URL,
       vals.PLAYER1_INSTANCE || "ursal.zone",
@@ -202,14 +212,22 @@ function loadConfig(): Cfg {
 
 interface Seen {
   id: string;
-  at: string;
   text: string;
-  visibility: string;
   hasPoll: boolean;
   /** Present when hasPoll — needed to vote. */
-  poll?: MastodonPoll | null;
+  poll: MastodonPoll | null;
 }
 
+function toSeen(s: MastodonStatus): Seen {
+  return {
+    id: s.id,
+    text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+    hasPoll: Boolean(s.poll),
+    poll: s.poll ?? null,
+  };
+}
+
+/** The bot's finale wording (champion, shared title or verdict), either locale. */
 class World {
   /** Ignore anything older than the run's start. */
   since = new Date().toISOString();
@@ -230,7 +248,6 @@ class World {
 
   constructor(
     readonly cfg: Cfg,
-    readonly host: MastodonAPI,
     readonly player: MastodonAPI,
   ) {}
 
@@ -254,40 +271,22 @@ class World {
   async botActivity(): Promise<Seen[]> {
     const sts = await this.player.getAccountStatusesByHandle(this.botHandle, 40);
     return sts
-      .filter((s) => s.created_at > this.since)
-      // Scope to this run's game, but never let the filter hide a poll or a
-      // round result: those are the things later steps actually wait for.
-      .filter((s) => !this.gameTheme || Boolean(s.poll) || s.content.includes(this.gameTheme))
-      .map((s) => ({
-        id: s.id,
-        at: s.created_at,
-        text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
-        visibility: s.visibility,
-        hasPoll: Boolean(s.poll),
-        poll: s.poll ?? null,
-      }));
+      .filter((s) => s.created_at > this.since && inRunGame(s, this.gameTheme))
+      .map(toSeen);
   }
 
   /** Bot statuses visible in a player's conversation with the bot. */
   async playerDmActivity(): Promise<Seen[]> {
     const convs = await this.player.getConversations(40);
     const viewer = this.cfg.player1Instance;
-    const out: Seen[] = [];
-    for (const c of convs) {
-      const s = c.last_status;
-      if (!s?.account) continue;
-      if (s.created_at <= this.since) continue;
-      if (!acctMatches(s.account.acct, viewer, this.botHandle)) continue;
-      out.push({
-        id: s.id,
-        at: s.created_at,
-        text: s.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
-        visibility: s.visibility,
-        hasPoll: Boolean(s.poll),
-        poll: s.poll ?? null,
-      });
-    }
-    return out;
+    return convs
+      .map((c) => c.last_status)
+      .filter((s): s is MastodonStatus =>
+        !!s?.account &&
+        s.created_at > this.since &&
+        acctMatches(s.account.acct, viewer, this.botHandle),
+      )
+      .map(toSeen);
   }
 
   /** One-line description of reality, printed while waiting. */
@@ -362,7 +361,7 @@ async function until<T>(
     if (probes % 4 === 0) {
       say(`    … ${label} | world: ${await world.snapshot()}`);
     }
-    await new Promise((r) => setTimeout(r, world.cfg.pollIntervalMs));
+    await sleep(world.cfg.pollIntervalMs);
   }
 
   throw new Backstop(label, await world.snapshot());
@@ -376,7 +375,7 @@ interface StepResult {
 }
 const results: StepResult[] = [];
 
-async function step(name: string, fn: () => Promise<string>, world: World) {
+async function step(name: string, fn: () => Promise<string>) {
   const started = Date.now();
   say(`▶ ${name}`);
   try {
@@ -406,7 +405,7 @@ async function main() {
   // players always tie by rule, and the bot cannot supply the third
   // vote because it owns the poll.
   const voter = new MastodonAPI(cfg.voter1ApiUrl, cfg.voter1Token, cfg.debug);
-  const world = new World(cfg, host, player);
+  const world = new World(cfg, player);
 
   say("resolving identities…");
   const me = await player.getMe();
@@ -431,9 +430,10 @@ async function main() {
     const st = await host.postStatus(content);
     say(`  host posted: ${content}`);
 
-    // The bot always answers - so wait for a reply that is NOT a refusal.
-    // A refusal means no game exists, and every later step would be
-    // operating on a game that was never created.
+    // The bot always answers, so wait for its creation announcement rather
+    // than for the absence of a refusal: an unknown failure copy must not
+    // look like a created game. A reply that is not the announcement means
+    // no game exists, and every later step would be operating on nothing.
     const reply = await until(
       async () => {
         const ctx = await host.getStatusContext(st.id);
@@ -441,16 +441,14 @@ async function main() {
         const fromBot = inThread.filter((s) =>
           acctMatches(s.account.acct, cfg.hostInstance, world.botHandle),
         );
-        const clean = fromBot.find(
-          (s) => !isRefusal(s.content.replace(/<[^>]+>/g, " ")),
-        );
+        const clean = fromBot.find((s) => looksLikeCreated(s.content.replace(/<[^>]+>/g, " ")));
         if (!clean && fromBot.length > 0) {
           const why = fromBot[fromBot.length - 1]!.content.replace(/<[^>]+>/g, " ").trim();
           say(`  ! bot refused: ${why.slice(0, 90)}`);
         }
         return clean;
       },
-      "bot created the game (not a refusal)",
+      "bot announced the game (its creation post)",
       cfg.backstop.create,
       world,
     );
@@ -463,7 +461,7 @@ async function main() {
     world.since = st.created_at;
     world.gameTheme = cfg.theme;
     return `game created, thread ${st.id}`;
-  }, world);
+  });
 
   // ── 2. Accept ────────────────────────────────────────────────────────
   await step("accept", async () => {
@@ -478,56 +476,53 @@ async function main() {
       async () => {
         const now = await world.playerDmActivity();
         const fresh = now.filter((s) => !before.includes(s.id));
-        const refusal = fresh.find((s) => isRefusal(s.text));
+        const refusal = fresh.find((s) => isRefusalText(s.text));
         if (refusal) say(`  ! bot refused: ${refusal.text.slice(0, 90)}`);
         // Both locales ship this: "You're in! 🎵" / "Você está dentro! 🎵".
         // looksLikeAcceptance rejects the invitation wording itself, since the
         // bot sends "You're invited to duel" in the message right before.
-        return fresh.find((s) => !isRefusal(s.text) && looksLikeAcceptance(s.text));
+        return fresh.find((s) => !isRefusalText(s.text) && looksLikeAcceptance(s.text));
       },
       "bot acknowledged the acceptance",
       cfg.backstop.accept,
       world,
     );
     return `challenger accepted: ${reply.text.slice(0, 60)}`;
-  }, world);
+  });
 
   // ── 3. Submit ────────────────────────────────────────────────────────
   // Fire the submissions, then watch for the state transition. No per-tune
   // ack waiting: the bot only posts a poll once BOTH players are done, and
   // that poll is the signal.
   await step("submit", async () => {
-    const all: Array<[MastodonAPI, string, string[]]> = [
-      [host, world.hostHandle, cfg.tuneUrlsHost],
-      [player, world.playerHandle, cfg.tuneUrlsPlayer1],
+    const all: Array<[MastodonAPI, string[]]> = [
+      [host, cfg.tuneUrlsHost],
+      [player, cfg.tuneUrlsPlayer1],
     ];
-    const total = all.reduce((n, [, , u]) => n + u.length, 0);
+    const total = all.reduce((n, [, u]) => n + u.length, 0);
     say(`  submitting ${total} tunes across ${all.length} players`);
 
     // Interleave submissions so neither player's queue dominates.
-    for (let i = 0; i < Math.max(...all.map(([, , u]) => u.length)); i++) {
-      for (const [api, , urls] of all) {
+    for (let i = 0; i < Math.max(...all.map(([, u]) => u.length)); i++) {
+      for (const [api, urls] of all) {
         const url = urls[i];
         if (url) await api.sendBotDM(world.botHandle, url);
       }
       // Brief pause so the bot's notification loop can drain; not a wait
       // for an acknowledgement.
-      await new Promise((r) => setTimeout(r, 1200));
+      await sleep(1200);
     }
 
     // Rejections are silent from the submitter's point of view: the bot just
-    // does not count the tune. Surface them so a bad URL cannot masquerade as
-    // a timing problem.
+    // does not count the tune. Surface every one so a bad URL cannot masquerade
+    // as a timing problem. The pass condition stays the poll below, though: the
+    // tune pool is deliberately larger than the playlist, so a rejected link
+    // does not by itself mean the duel cannot start (4 dead videos in a 32-link
+    // pool still fill both playlists).
     const rejects = (await world.playerDmActivity()).filter((s) =>
-      /n[aã]o reproduz|invalid|inv[aá]lid/i.test(s.text),
+      looksLikeTuneRejection(s.text),
     );
-    if (rejects.length > 0) {
-      for (const r of rejects) say(`  ! rejected: ${r.text.slice(0, 100)}`);
-      throw new Error(
-        `${rejects.length} tune(s) rejected as non-reproducible - ` +
-          `a player cannot reach ${cfg.playlistLength} tunes, so no poll is possible`,
-      );
-    }
+    for (const r of rejects) say(`  ! rejected: ${r.text.slice(0, 100)}`);
 
     // A poll means both playlists registered. The bot may already have
     // resolved it by the time we look, so also accept a game that has moved
@@ -537,17 +532,17 @@ async function main() {
         const pub = await world.botActivity();
         const withPoll = pub.find((s) => s.hasPoll);
         if (withPoll) return withPoll;
-        const advanced = pub.find((s) =>
-          /rodada|round|campe[aã]o|empate|vencedor|final/i.test(s.text),
-        );
-        return advanced ?? undefined;
+        // A resolved round deletes its poll status, so the round number in the
+        // bot's copy is the durable proof the duel started - the vote loop's
+        // parse, not a second guess (which also matched the pt forfeit notice).
+        return pub.find((s) => roundsSeen([s]) > 0);
       },
       "bot started the first round (poll or round result)",
       cfg.backstop.submit,
       world,
     );
-    return `${total} submitted, 0 rejected, first round ${poll.id}`;
-  }, world);
+    return `${total} submitted, ${rejects.length} rejected, first round ${poll.id}`;
+  });
 
   // ── 4/5. Vote, every round ───────────────────────────────────────────
   //
@@ -561,22 +556,18 @@ async function main() {
   // The bot read each tally correctly and called them ties, which is right
   // for a round nobody voted in. The harness was the thing under-testing.
   //
-  // Two things this loop must get right, both now unit-tested in
-  // vote-planner.ts:
+  // Two things this loop must get right:
   //   - one vote per poll id, or the same poll is re-voted on every pass and
   //     the tally inflates
   //   - stop on a signal (the bot's own finale announcement, or the declared
-  //     length played out), not on a fixed count
+  //     length played out), not on a fixed count - unit-tested in
+  //     vote-planner.ts
   await step("vote", async () => {
-    // Each voter and the option they back. The two players back option 0 and
+    // Who casts each ballot in castPlan. The two players back option 0 and
     // the spectator backs option 1, so the round resolves 2-1: ROUND_QUORUM is
     // 3, and a unanimous tally would satisfy it without the bot ever
     // comparing anything.
-    const castOn = new Map<string, [MastodonAPI, number]>([
-      ["host", [host, 0]],
-      ["challenger", [player, 0]],
-      ["voter", [voter, 1]],
-    ]);
+    const clients: Record<string, MastodonAPI> = { host, challenger: player, voter };
     const votedPolls = new Set<string>();
     const tally: string[] = [];
     let round = 1;
@@ -585,13 +576,11 @@ async function main() {
       const pub = await world.botActivity();
 
       // A finale ends the voting whether or not every round was reached.
-      const finale = pub.find((s) =>
-        /final|encerrad|vencedor|terminou|acabou|🏆|parabéns|parabens/i.test(s.text),
-      );
+      const finale = pub.find((s) => looksLikeFinale(s.text));
       const open = pub.find((s) => s.hasPoll && s.poll && !s.poll.expired);
       const roundNo = roundsSeen(pub);
 
-      if (!shouldStopVoting({ hasFinale: !!finale, roundNumber: roundNo || round, playlistLength: cfg.playlistLength })) {
+      if (!keepVoting({ hasFinale: !!finale, roundNumber: roundNo || round, playlistLength: cfg.playlistLength })) {
         if (finale) {
           say(`  finale announced after ${round - 1} voted round(s)`);
         } else {
@@ -603,28 +592,27 @@ async function main() {
       // Nothing to vote on yet: the bot is still collecting, or the poll has
       // expired and the next round has not opened.
       if (!open?.poll) {
-        await new Promise((r) => setTimeout(r, world.cfg.pollIntervalMs));
+        await sleep(world.cfg.pollIntervalMs);
         continue;
       }
 
       const pollId = String(open.poll.id);
-      if (alreadyVotedOn(votedPolls, pollId)) {
+      if (votedPolls.has(pollId)) {
         // Same poll, already counted. Wait for the next one rather than
         // re-voting: a second cast on the same poll is a wrong tally.
-        await new Promise((r) => setTimeout(r, world.cfg.pollIntervalMs));
+        await sleep(world.cfg.pollIntervalMs);
         continue;
       }
 
       say(`  round ${round}: poll ${pollId} — ${open.poll.options.map((o) => o.title).join(" vs ")}`);
       const casts = castPlan(open.poll.options.length, 0);
-      for (const { label } of casts) {
-        const entry = castOn.get(label);
-        if (!entry) {
+      for (const { label, choice } of casts) {
+        const api = clients[label];
+        if (!api) {
           throw new Error(`no client for voter "${label}" - the cast plan and the client map disagree`);
         }
-        const [api, pick] = entry;
-        const r = await api.votePoll(open.id, pollId, [pick]);
-        tally.push(`${label}=${pick}:${r.voters_count ?? "?"}`);
+        const r = await api.votePoll(open.id, pollId, [choice]);
+        tally.push(`${label}=${choice}:${r.voters_count ?? "?"}`);
       }
       votedPolls.add(pollId);
       round += 1;
@@ -648,13 +636,13 @@ async function main() {
       throw new Error("no poll was ever open to vote on");
     }
     return `${votedPolls.size} round(s) voted: ${tally.join(" ")}`;
-  }, world);
+  });
 
   /**
    * The highest round number the bot has announced, or 0 if none yet.
    * "Round 3! Vote for the best tune" -> 3.
    */
-  function roundsSeen(pub: Awaited<ReturnType<World["botActivity"]>>): number {
+  function roundsSeen(pub: Seen[]): number {
     let high = 0;
     for (const s of pub) {
       for (const m of s.text.matchAll(/(?:round|rodada)\s*#?(\d+)/gi)) {
@@ -670,16 +658,14 @@ async function main() {
     await until(
       async () => {
         const pub = await world.botActivity();
-        return pub.find((s) =>
-          /final|encerrad|vencedor|terminou|acabou|🏆|parabéns|parabens/i.test(s.text),
-        );
+        return pub.find((s) => looksLikeFinale(s.text));
       },
       "bot announced the finale (champion, shared title, or verdict)",
       cfg.backstop.finale,
       world,
     );
     return "finale announced";
-  }, world);
+  });
 }
 
 // ─── Report ────────────────────────────────────────────────────────────
@@ -702,9 +688,7 @@ function report() {
   console.log("─".repeat(64));
   console.log(`  ${ok} passed, ${bad} failed, total ${((Date.now() - t0) / 1000).toFixed(0)}s`);
   console.log("═".repeat(64));
-  // A run that threw is a failure even when no step recorded one. Exiting 0
-  // on an empty result list is how a config error looked like a green run.
-  process.exit(bad > 0 || fatal ? 1 : 0);
+  process.exit(driverExitCode(results, fatal));
 }
 
 /**

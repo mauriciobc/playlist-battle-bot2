@@ -1,4 +1,3 @@
-import { transition } from "./stateMachine.js";
 import {
   awardVotePoints,
   applyPotBonus,
@@ -16,7 +15,7 @@ import { m, type Messages } from "../i18n/index.js";
  * process locale at call time) so domain errors never silently depend on global state.
  */
 
-export type Participant = {
+type Participant = {
   accountId: string;
   acct: string;
 };
@@ -76,7 +75,7 @@ export function createGameInput(
 
   const game: Game = {
     id: cfg.id,
-    status: transition("CREATED", "INVITE_SENT"),
+    status: "INVITED",
     theme: input.theme.trim(),
     playlistLength: input.playlistLength,
     hostAccountId: input.host.accountId,
@@ -95,7 +94,6 @@ export function createGameInput(
     {
       accountId: input.host.accountId,
       acct: input.host.acct,
-      displayName: null,
       role: "host",
       inviteStatus: "accepted",
       points: 0,
@@ -105,8 +103,7 @@ export function createGameInput(
       (c): Player => ({
         accountId: c.accountId,
         acct: c.acct,
-        displayName: null,
-        role: "challenger",
+          role: "challenger",
         inviteStatus: "pending",
         points: 0,
         joinedAt: null,
@@ -143,7 +140,7 @@ export function acceptInvite(
   );
   const alreadyCollecting = game.status === "COLLECTING";
   const anyAccepted = updated.some((p) => p.role === "challenger" && p.inviteStatus === "accepted");
-  const status: GameStatus = alreadyCollecting || !anyAccepted ? game.status : transition("INVITED", "FIRST_ACCEPT");
+  const status: GameStatus = alreadyCollecting || !anyAccepted ? game.status : "COLLECTING";
   return {
     game: { ...game, status, updatedAt: nowIso },
     players: updated,
@@ -256,7 +253,7 @@ export function finalizeCollection(
   // Exactly one complete playlist → no duel, that player wins by default.
   if (completeIds.length === 1) {
     return {
-      game: { ...base, status: transition("COLLECTING", "DEFAULT_WIN") },
+      game: { ...base, status: "FINALE" },
       players: updatedPlayers,
       outcome: "default_win",
       defaultWinnerId: completeIds[0]!,
@@ -265,7 +262,7 @@ export function finalizeCollection(
 
   if (completeIds.length === 0) {
     return {
-      game: { ...base, status: transition("COLLECTING", "FIZZLE") },
+      game: { ...base, status: "FIZZLED" },
       players: updatedPlayers,
       outcome: "fizzled",
       defaultWinnerId: null,
@@ -276,7 +273,7 @@ export function finalizeCollection(
   return {
     game: {
       ...base,
-      status: transition("COLLECTING", "SUBMISSION_WINDOW_EXPIRED", "READY"),
+      status: "READY",
       submissionDeadline: nowIso,
     },
     players: updatedPlayers,
@@ -288,7 +285,7 @@ export function finalizeCollection(
 export function startRound(game: Game, round: number, now: Date = new Date()): Game {
   return {
     ...game,
-    status: transition("READY", "START_ROUND"),
+    status: "ROUND",
     currentRound: round,
     updatedAt: now.toISOString(),
   };
@@ -299,7 +296,6 @@ export type ResolveRoundInput = {
   players: Player[];
   tallies: { accountId: string; votes: number }[];
   roundNumber: number;
-  playlistLength: number;
   now: Date;
 };
 
@@ -311,14 +307,13 @@ export function resolveRound(input: ResolveRoundInput): {
   winnerAccountId: string | null;
   potAwarded: number;
   finalSplit: FinalSplit | null;
-  nextState: GameStatus;
 } {
-  const { game, players, tallies, roundNumber, playlistLength, now } = input;
+  const { game, players, tallies, roundNumber, now } = input;
 
   const score = resolveRoundScore({ tallies, pot: game.pot });
   let updated = awardVotePoints(players, tallies);
 
-  const isFinal = roundNumber >= playlistLength;
+  const isFinal = roundNumber >= game.playlistLength;
   let potAfter = score.potAfter;
   let finalSplit: FinalSplit | null = null;
 
@@ -326,21 +321,11 @@ export function resolveRound(input: ResolveRoundInput): {
     // Final-round tie (v1.1): split the pre-round pot among the tied players
     // (integer division, remainder discarded); the pot does not grow.
     const totalVotes = tallies.reduce((sum, t) => sum + t.votes, 0);
-    const sorted = [...tallies].sort((a, b) => b.votes - a.votes);
-    const top = sorted[0];
-    const uniqueLeader =
-      top !== undefined &&
-      top.votes > 0 &&
-      tallies.filter((t) => t.votes === top.votes).length === 1;
-    const quorumForced = tallies.length > 0 && totalVotes < ROUND_QUORUM && uniqueLeader;
-    let tiedIds: string[];
-    if (quorumForced) {
-      // Quorum-forced tie with a unique leader → all poll participants share.
-      tiedIds = tallies.map((t) => t.accountId);
-    } else {
-      const topVotes = top?.votes ?? 0;
-      tiedIds = tallies.filter((t) => t.votes === topVotes).map((t) => t.accountId);
-    }
+    const topVotes = Math.max(0, ...tallies.map((t) => t.votes));
+    const leaders = tallies.filter((t) => t.votes === topVotes);
+    // Quorum-forced tie with a unique leader → all poll participants share.
+    const quorumForced = totalVotes < ROUND_QUORUM && topVotes > 0 && leaders.length === 1;
+    const tiedIds = (quorumForced ? tallies : leaders).map((t) => t.accountId);
     const split = splitPotAmong(updated, tiedIds, game.pot);
     updated = split.players;
     potAfter = 0;
@@ -351,14 +336,10 @@ export function resolveRound(input: ResolveRoundInput): {
     updated = applyPotBonus(updated, score.winnerAccountId, score.potAwarded);
   }
 
-  const nextStatus = isFinal
-    ? transition("ROUND", "ROUND_RESOLVED", "FINALE")
-    : transition("ROUND", "ROUND_RESOLVED", "ROUND");
-
   return {
     game: {
       ...game,
-      status: nextStatus,
+      status: isFinal ? "FINALE" : "ROUND",
       pot: potAfter,
       currentRound: isFinal ? roundNumber : roundNumber + 1,
       updatedAt: now.toISOString(),
@@ -367,6 +348,5 @@ export function resolveRound(input: ResolveRoundInput): {
     winnerAccountId: score.winnerAccountId,
     potAwarded: score.potAwarded,
     finalSplit,
-    nextState: nextStatus,
   };
 }

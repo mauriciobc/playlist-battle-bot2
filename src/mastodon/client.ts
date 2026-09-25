@@ -36,22 +36,18 @@ export class RateLimitError extends Error {
   }
 }
 
-export type RateLimitState = {
+type RateLimitState = {
   limit: number;
   remaining: number;
   resetAt: number; // unix seconds
 };
 
-export type MastodonClientOptions = {
+type MastodonClientOptions = {
   baseUrl: string;
   token: string;
   fetchImpl?: typeof fetch;
-  /** Base delay for exponential backoff between retries (ms). */
-  retryBaseDelayMs?: number;
   maxRetries?: number;
-  requestTimeoutMs?: number;
   db?: Db;
-  sleepImpl?: (ms: number) => Promise<void>;
   /** Optional structured logger for live debugging (never logs credentials). */
   log?: Logger;
 };
@@ -61,17 +57,16 @@ export type RequestOptions = {
   idempotencyKey?: string;
 };
 
-const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Base delay for exponential backoff between retries (ms). */
+const RETRY_BASE_DELAY_MS = 500;
 
 export class MastodonClient {
   readonly baseUrl: string;
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly retryBaseDelayMs: number;
   private readonly maxRetries: number;
-  private   readonly requestTimeoutMs: number;
   private readonly db: Db | undefined;
-  private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: Logger | undefined;
 
   rateLimit: RateLimitState | null = null;
@@ -80,11 +75,8 @@ export class MastodonClient {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.retryBaseDelayMs = opts.retryBaseDelayMs ?? 500;
     this.maxRetries = opts.maxRetries ?? 2;
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000;
     this.db = opts.db;
-    this.sleep = opts.sleepImpl ?? defaultSleep;
     this.log = opts.log;
   }
 
@@ -156,20 +148,12 @@ export class MastodonClient {
 
         let res: Response;
         try {
-          const merged: RequestInit = {
-            ...init,
-            headers,
-            signal: init.signal ?? AbortSignal.timeout(this.requestTimeoutMs),
-          };
-          res = await this.fetchImpl(url, merged);
+          res = await this.fetchImpl(url, { ...init, headers, signal: AbortSignal.timeout(15_000) });
         } catch (err) {
           if (attempt < maxRetries) {
-            const delayMs = this.retryBaseDelayMs * 2 ** attempt;
-            this.log?.warn(
-              { method, path, attempt: attempt + 1, delayMs, reason: "network" },
-              "mastodon request retry",
-            );
-            await this.sleep(delayMs);
+            await this.waitBeforeRetry(method, path, attempt, RETRY_BASE_DELAY_MS * 2 ** attempt, {
+              reason: "network",
+            });
             attempt += 1;
             continue;
           }
@@ -181,7 +165,7 @@ export class MastodonClient {
         if (res.ok) {
           if (this.db && effectId) {
             try {
-              markOutboxSent(this.db, effectId, null);
+              markOutboxSent(this.db, effectId);
             } catch {
               // Keep the remote result successful even if ledger persistence fails.
             }
@@ -213,21 +197,12 @@ export class MastodonClient {
             // Wait out the true window before the one allowed retry. A
             // Retry-After guess could be 1s for a window that resets in
             // minutes, spending another request against that same window.
-            const delayMs = Math.max(0, resetAt * 1000 - Date.now());
-            this.log?.warn(
-              {
-                method,
-                path,
-                attempt: attempt + 1,
-                limit: this.rateLimit?.limit ?? null,
-                remaining: this.rateLimit?.remaining ?? null,
-                reason: "rate_limit",
-                delayMs,
-                resetsAt,
-              },
-              "mastodon request retry",
-            );
-            await this.sleep(delayMs);
+            await this.waitBeforeRetry(method, path, attempt, Math.max(0, resetAt * 1000 - Date.now()), {
+              limit: this.rateLimit?.limit ?? null,
+              remaining: this.rateLimit?.remaining ?? null,
+              resetsAt,
+              reason: "rate_limit",
+            });
             attempt += 1;
             bypassRateLimit = true;
             continue;
@@ -248,12 +223,10 @@ export class MastodonClient {
         }
 
         if (res.status >= 500 && attempt < maxRetries) {
-          const delayMs = this.retryBaseDelayMs * 2 ** attempt;
-          this.log?.warn(
-            { method, path, status: res.status, attempt: attempt + 1, delayMs, reason: "server_error" },
-            "mastodon request retry",
-          );
-          await this.sleep(delayMs);
+          await this.waitBeforeRetry(method, path, attempt, RETRY_BASE_DELAY_MS * 2 ** attempt, {
+            status: res.status,
+            reason: "server_error",
+          });
           attempt += 1;
           continue;
         }
@@ -288,6 +261,18 @@ export class MastodonClient {
       }
       throw err;
     }
+  }
+
+  /** Log a retry with the backoff being waited out, then sleep for it. */
+  private async waitBeforeRetry(
+    method: string,
+    path: string,
+    attempt: number,
+    delayMs: number,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    this.log?.warn({ method, path, attempt: attempt + 1, delayMs, ...detail }, "mastodon request retry");
+    await sleep(delayMs);
   }
 
   private trackRateLimit(res: Response): void {

@@ -1,14 +1,16 @@
 import type { Db } from "../db/index.js";
 import { NON_TERMINAL_STATUS_SQL } from "../db/index.js";
 import type { Game, Player, Tune } from "./types.js";
+import type { NotificationCursor } from "../mastodon/notifications.js";
 
 /**
- * Row mapping + persistence for games/players/tunes/rounds.
- * The single owner of SQL↔domain translation; handlers and scheduler both
+ * Row mapping + persistence: games, players, tunes, rounds, notification
+ * failures, loop heartbeats, the outbox ledger and the notification cursor.
+ * The single owner of SQL↔domain translation; handlers and the scheduler both
  * go through this module instead of keeping private copies of the mappers.
  */
 
-export function mapGame(r: Record<string, unknown>): Game {
+function mapGame(r: Record<string, unknown>): Game {
   return {
     id: r.id as string,
     status: r.status as Game["status"],
@@ -31,7 +33,6 @@ function mapPlayer(r: Record<string, unknown>): Player {
   return {
     accountId: r.account_id as string,
     acct: r.acct as string,
-    displayName: (r.display_name as string | null) ?? null,
     role: r.role as Player["role"],
     inviteStatus: r.invite_status as Player["inviteStatus"],
     points: r.points as number,
@@ -89,33 +90,50 @@ export function insertGame(
 }
 
 export function saveGame(db: Db, g: Game, expectedStatus?: Game["status"]): boolean {
-  const result = expectedStatus === undefined
-    ? db.prepare(
-        `UPDATE games SET status=?, theme=?, playlist_length=?, host_account_id=?, poll_duration_sec=?,
-          acceptance_deadline=?, submission_deadline=?, thread_root_id=?, current_round=?, pot=?,
-          updated_at=? WHERE id=?`,
-      ).run(
-        g.status, g.theme, g.playlistLength, g.hostAccountId, g.pollDurationSec,
-        g.acceptanceDeadline, g.submissionDeadline, g.threadRootId, g.currentRound, g.pot,
-        g.updatedAt, g.id,
-      )
-    : db.prepare(
-        `UPDATE games SET status=?, theme=?, playlist_length=?, host_account_id=?, poll_duration_sec=?,
-          acceptance_deadline=?, submission_deadline=?, thread_root_id=?, current_round=?, pot=?,
-          updated_at=? WHERE id=? AND status=?`,
-      ).run(
-        g.status, g.theme, g.playlistLength, g.hostAccountId, g.pollDurationSec,
-        g.acceptanceDeadline, g.submissionDeadline, g.threadRootId, g.currentRound, g.pot,
-        g.updatedAt, g.id, expectedStatus,
-      );
+  const guard = expectedStatus === undefined ? [] : [expectedStatus];
+  const result = db.prepare(
+    `UPDATE games SET status=?, theme=?, playlist_length=?, host_account_id=?, poll_duration_sec=?,
+      acceptance_deadline=?, submission_deadline=?, thread_root_id=?, current_round=?, pot=?,
+      updated_at=? WHERE id=?${guard.length ? " AND status=?" : ""}`,
+  ).run(
+    g.status, g.theme, g.playlistLength, g.hostAccountId, g.pollDurationSec,
+    g.acceptanceDeadline, g.submissionDeadline, g.threadRootId, g.currentRound, g.pot,
+    g.updatedAt, g.id, ...guard,
+  );
   return result.changes === 1;
+}
+
+/** Atomically save a game (guarded by its expected status) and its players. */
+/**
+ * Move a game from `expected` to `next`, stamping updated_at. False when the
+ * game is no longer in `expected`, so the caller can skip the side effects of
+ * a transition another sweep already made.
+ */
+export function setGameStatus(
+  db: Db,
+  gameId: string,
+  expected: Game["status"],
+  next: Game["status"],
+  at: Date,
+): boolean {
+  return db
+    .prepare("UPDATE games SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+    .run(next, at.toISOString(), gameId, expected).changes === 1;
+}
+
+export function saveGameState(db: Db, g: Game, players: Player[], expectedStatus: Game["status"]): boolean {
+  return db.transaction(() => {
+    if (!saveGame(db, g, expectedStatus)) return false;
+    for (const p of players) savePlayer(db, g.id, p);
+    return true;
+  })();
 }
 
 export function insertPlayer(db: Db, gameId: string, p: Player): void {
   db.prepare(
-    `INSERT INTO players (game_id, account_id, acct, display_name, role, invite_status, points, joined_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(gameId, p.accountId, p.acct, p.displayName, p.role, p.inviteStatus, p.points, p.joinedAt);
+    `INSERT INTO players (game_id, account_id, acct, role, invite_status, points, joined_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(gameId, p.accountId, p.acct, p.role, p.inviteStatus, p.points, p.joinedAt);
 }
 
 /** Append a resolved tune to a player's playlist (position comes from the engine). */
@@ -126,11 +144,11 @@ export function insertTune(db: Db, gameId: string, t: Tune): void {
   ).run(gameId, t.accountId, t.position, t.videoId, t.title, t.canonicalUrl);
 }
 
-export function savePlayer(db: Db, gameId: string, p: Player): void {
+function savePlayer(db: Db, gameId: string, p: Player): void {
   db.prepare(
-    `UPDATE players SET acct=?, display_name=?, role=?, invite_status=?, points=?, joined_at=?
+    `UPDATE players SET acct=?, role=?, invite_status=?, points=?, joined_at=?
      WHERE game_id=? AND account_id=?`,
-  ).run(p.acct, p.displayName, p.role, p.inviteStatus, p.points, p.joinedAt, gameId, p.accountId);
+  ).run(p.acct, p.role, p.inviteStatus, p.points, p.joinedAt, gameId, p.accountId);
 }
 
 /**
@@ -162,34 +180,8 @@ export function lastHostedCreation(db: Db, accountId: string): string | null {
 
 // ── rounds ──────────────────────────────────────────────────
 
-export function saveWalkoverRound(
-  db: Db,
-  gameId: string,
-  round: number,
-  winnerAccountId: string | null,
-  participants: string[] = [],
-  resolutionJson: string | null = null,
-): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO rounds
-      (game_id, number, status, winner_account_id, option_map_json, resolution_json)
-     VALUES (?, ?, 'walkover', ?, ?, ?)`,
-  ).run(gameId, round, winnerAccountId, JSON.stringify({ participants }), resolutionJson);
-}
-
-export function saveAutoTieRound(
-  db: Db,
-  gameId: string,
-  round: number,
-  optionMap: Record<string, unknown> = {},
-  resolutionJson: string | null = null,
-): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO rounds
-      (game_id, number, status, option_map_json, resolution_json)
-     VALUES (?, ?, 'auto_tied', ?, ?)`,
-  ).run(gameId, round, JSON.stringify(optionMap), resolutionJson);
-}
+/** Round statuses that carry a decided result (poll, walkover or auto-tie). */
+export const RESOLVED_ROUND_STATUSES: readonly string[] = ["resolved", "auto_tied", "walkover"];
 
 export function savePollRound(
   db: Db,
@@ -254,31 +246,24 @@ export function loadRoundWinners(
     .all(gameId) as { number: number; winner_account_id: string }[];
 }
 
+type RoundRow = {
+  status: string;
+  winner_account_id: string | null;
+  option_map_json: string;
+  resolution_posted_at: string | null;
+  resolution_json: string | null;
+};
+
 export function loadRound(
   db: Db,
   gameId: string,
   roundNumber: number,
-): {
-  status: string;
-  winner_account_id: string | null;
-  option_map_json: string;
-  option_map: Record<string, unknown>;
-  resolution_posted_at: string | null;
-  resolution_json: string | null;
-} | undefined {
+): (RoundRow & { option_map: Record<string, unknown> }) | undefined {
   const row = db
     .prepare(
       "SELECT status, winner_account_id, option_map_json, resolution_posted_at, resolution_json FROM rounds WHERE game_id = ? AND number = ?",
     )
-    .get(gameId, roundNumber) as
-    | {
-        status: string;
-        winner_account_id: string | null;
-        option_map_json: string;
-        resolution_posted_at: string | null;
-        resolution_json: string | null;
-      }
-    | undefined;
+    .get(gameId, roundNumber) as RoundRow | undefined;
   if (!row) return undefined;
   let optionMap: Record<string, unknown> = {};
   try {
@@ -306,19 +291,6 @@ export type RoundMeta = {
 export function roundMeta(row: { option_map?: Record<string, unknown> } | undefined): RoundMeta {
   return (row?.option_map ?? {}) as RoundMeta;
 }
-
-/**
- * Boot-time cleanup: drop in-flight notification claims left by a process
- * that died mid-handle, so those notifications are retried after restart.
- */
-export type NotificationFailure = {
-  notificationId: string;
-  attempts: number;
-  lastError: string;
-  nextAttemptAt: string | null;
-  deadLetteredAt: string | null;
-  updatedAt: string;
-};
 
 export function recordNotificationFailure(
   db: Db,
@@ -373,18 +345,12 @@ export function deferUntilNotifications(db: Db, now: Date = new Date()): Set<str
   return new Set(rows.map((r) => r.notificationId));
 }
 
-export function listDeadLetteredNotifications(db: Db, limit = 100): NotificationFailure[] {
-  return db
-    .prepare(
-      `SELECT notification_id AS notificationId, attempts, last_error AS lastError,
-              next_attempt_at AS nextAttemptAt, dead_lettered_at AS deadLetteredAt,
-              updated_at AS updatedAt
-       FROM notification_failures
-       WHERE dead_lettered_at IS NOT NULL
-       ORDER BY updated_at DESC LIMIT ?`,
-    )
-    .all(limit) as NotificationFailure[];
-}
+/**
+ * Loops the scheduler runs. Each writes a heartbeat via touchLoopHeartbeat and
+ * the healthcheck requires all of them to be fresh — one list, so a renamed or
+ * added loop cannot leave the health contract behind.
+ */
+export const LOOP_LABELS = ["notifications", "deadlines", "polls", "recovery"] as const;
 
 export function touchLoopHeartbeat(db: Db, loop: string, at: Date = new Date()): void {
   db.prepare(
@@ -392,26 +358,6 @@ export function touchLoopHeartbeat(db: Db, loop: string, at: Date = new Date()):
      ON CONFLICT(loop) DO UPDATE SET last_success_at = excluded.last_success_at`,
   ).run(loop, at.toISOString());
 }
-
-export function lastSuccessfulLoopAt(db: Db): Date | null {
-  const row = db
-    .prepare("SELECT MAX(last_success_at) AS last_success_at FROM loop_heartbeats")
-    .get() as { last_success_at: string | null } | undefined;
-  return row?.last_success_at ? new Date(row.last_success_at) : null;
-}
-
-export type OutboxEffect = {
-  id: string;
-  method: "POST" | "DELETE";
-  path: string;
-  bodyJson: string | null;
-  status: "pending" | "sent" | "failed" | "unknown";
-  attempts: number;
-  remoteId: string | null;
-  lastError: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
 
 export function createOutboxEffect(
   db: Db,
@@ -437,10 +383,10 @@ export function createOutboxEffect(
   ).run(id, method, path, bodyJson, now, now);
 }
 
-export function markOutboxSent(db: Db, id: string, remoteId: string | null): void {
+export function markOutboxSent(db: Db, id: string): void {
   db.prepare(
-    `UPDATE outbox_effects SET status = 'sent', remote_id = ?, updated_at = ? WHERE id = ?`,
-  ).run(remoteId, new Date().toISOString(), id);
+    `UPDATE outbox_effects SET status = 'sent', updated_at = ? WHERE id = ?`,
+  ).run(new Date().toISOString(), id);
 }
 
 export function markOutboxFailed(db: Db, id: string, error: string, status: "failed" | "unknown" = "failed"): void {
@@ -449,27 +395,34 @@ export function markOutboxFailed(db: Db, id: string, error: string, status: "fai
   ).run(status, error, new Date().toISOString(), id);
 }
 
-export function listOutboxEffects(db: Db, status: OutboxEffect["status"], limit = 100): OutboxEffect[] {
+/** Boot-time: effects still pending belong to a dead process and may or may not have landed. */
+export function markPendingOutboxEffectsUnknown(db: Db): number {
   return db
-    .prepare(
-      `SELECT id, method, path, body_json AS bodyJson, status, attempts,
-              remote_id AS remoteId, last_error AS lastError,
-              created_at AS createdAt, updated_at AS updatedAt
-       FROM outbox_effects WHERE status = ? ORDER BY updated_at DESC LIMIT ?`,
-    )
-    .all(status, limit) as OutboxEffect[];
-}
-
-export function markStaleOutboxEffectsUnknown(db: Db, olderThanMs = 5 * 60_000): number {
-  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-  const result = db
     .prepare(
       `UPDATE outbox_effects
        SET status = 'unknown', last_error = COALESCE(last_error, 'process restarted before completion'), updated_at = ?
-        WHERE status = 'pending' AND updated_at <= ?`,
+       WHERE status = 'pending'`,
     )
-    .run(new Date().toISOString(), cutoff);
-  return result.changes;
+    .run(new Date().toISOString()).changes;
+}
+
+/**
+ * Boot-time cleanup: drop in-flight notification claims left by a process
+ * that died mid-handle, so those notifications are retried after restart.
+ */
+/**
+ * Notification cursor row: the id of the last handled notification. Persisted
+ * so a restart resumes where the previous process stopped.
+ */
+export function readCursor(db: Db): NotificationCursor {
+  const row = db.prepare("SELECT last_notification_id FROM cursor WHERE id = 1").get() as {
+    last_notification_id: string;
+  };
+  return { lastId: row.last_notification_id };
+}
+
+export function writeCursor(db: Db, cursor: NotificationCursor): void {
+  db.prepare("UPDATE cursor SET last_notification_id = ? WHERE id = 1").run(cursor.lastId);
 }
 
 export function releasePendingNotificationClaims(db: Db): void {

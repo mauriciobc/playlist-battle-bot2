@@ -1,7 +1,6 @@
 import type { HandlerDeps } from "../handlers/mention.js";
 import { processNotification } from "../handlers/mention.js";
-import { deferUntilNotifications } from "../game/store.js";
-import { readCursor, writeCursor } from "../db/cursor.js";
+import { deferUntilNotifications, readCursor, writeCursor } from "../game/store.js";
 import { advance, type RawNotification } from "./notifications.js";
 
 /**
@@ -29,9 +28,8 @@ export async function pollNotifications(deps: HandlerDeps): Promise<void> {
       throw new Error("Notification pagination returned a repeated page");
     }
     visited.add(nextPath);
-    const response: { data: RawNotification[]; linkNext: string | null } = deps.client.getWithLink
-      ? await deps.client.getWithLink<RawNotification[]>(nextPath)
-      : { data: await deps.client.get<RawNotification[]>(nextPath), linkNext: null };
+    const response: { data: RawNotification[]; linkNext: string | null } =
+      await deps.client.getWithLink<RawNotification[]>(nextPath);
     const notifications = response.data;
 
     if (!Array.isArray(notifications) || notifications.length === 0) {
@@ -85,9 +83,7 @@ export async function initializeNotificationCursor(deps: NotificationCursorDeps)
   const cursor = readCursor(deps.db);
   if (cursor.lastId) return;
 
-  const response = deps.client.getWithLink
-    ? await deps.client.getWithLink<RawNotification[]>("/api/v1/notifications?limit=1")
-    : { data: await deps.client.get<RawNotification[]>("/api/v1/notifications?limit=1"), linkNext: null };
+  const response = await deps.client.getWithLink<RawNotification[]>("/api/v1/notifications?limit=1");
   if (!Array.isArray(response.data) || response.data.length === 0) return;
 
   const latest = response.data.reduce((max, notification) =>

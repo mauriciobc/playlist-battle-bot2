@@ -1,5 +1,5 @@
 import { m } from "../i18n/index.js";
-import { MIN_QUEUE_TUNES, resolveQueueUrl } from "./queue.js";
+import { resolveQueueUrl } from "./queue.js";
 import {
   YtMusicPlaylistClient,
   YtMusicError,
@@ -16,13 +16,11 @@ import {
  * cooperate, so failures are logged and degrade to `null`, never thrown.
  */
 
-export type BattlePlaylistTune = { round: number; videoId: string };
-
-export type BattlePlaylistInput = {
+type BattlePlaylistInput = {
   theme: string;
   rounds: number;
   /** Round-winning tunes in round order. */
-  tunes: BattlePlaylistTune[];
+  tunes: { round: number; videoId: string }[];
   /**
    * Playlist created by an earlier attempt that did not finish (crash resume):
    * it is reused rather than created twice.
@@ -30,7 +28,7 @@ export type BattlePlaylistInput = {
   existingPlaylistId: string | null;
 };
 
-export type BattlePlaylistLink = {
+type BattlePlaylistLink = {
   url: string;
   /** Set for an account playlist, null for an anonymous queue link. */
   playlistId: string | null;
@@ -38,7 +36,7 @@ export type BattlePlaylistLink = {
 
 export type BattlePlaylistPublisher = (input: BattlePlaylistInput) => Promise<BattlePlaylistLink | null>;
 
-export type BattlePlaylistPublisherOptions = {
+type BattlePlaylistPublisherOptions = {
   /** Absent → anonymous queue links only. */
   auth?: YtMusicAuth | null;
   privacy?: PlaylistPrivacy;
@@ -75,7 +73,8 @@ export function createBattlePlaylistPublisher(
     // different rounds), but the write path dedupes by video ID: a repeated ID
     // makes YouTube reject the whole batch.
     const videoIds = [...new Set(input.tunes.map((t) => t.videoId))];
-    if (videoIds.length < MIN_QUEUE_TUNES) return null;
+    // A single tune is not a queue — it already gets its own finale post (PRD §5.7).
+    if (videoIds.length < 2) return null;
 
     if (client) {
       try {

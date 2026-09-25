@@ -4,6 +4,7 @@ import { YtMusicError, YtMusicPlaylistClient } from "../src/youtube/ytmusic.js";
 
 const COOKIE = "SID=abc; __Secure-3PAPISID=AbC/Def+123=";
 const SAPISID = "AbC/Def+123=";
+const META = { title: "t", description: "d", privacy: "PUBLIC" } as const;
 
 type Captured = { url: string; init: RequestInit };
 
@@ -23,18 +24,15 @@ function jsonBody(call: Captured): Record<string, unknown> {
   return JSON.parse(String(call.init.body)) as Record<string, unknown>;
 }
 
-function client(fetchImpl: typeof fetch, authUser?: number): YtMusicPlaylistClient {
-  return new YtMusicPlaylistClient({
-    auth: authUser === undefined ? { cookie: COOKIE } : { cookie: COOKIE, authUser },
-    fetchImpl,
-  });
+function client(fetchImpl: typeof fetch, authUser = 0): YtMusicPlaylistClient {
+  return new YtMusicPlaylistClient({ auth: { cookie: COOKIE, authUser }, fetchImpl });
 }
 
 describe("YtMusicPlaylistClient.createPlaylist", () => {
-  it("posts the requested metadata and returns the new playlist ID", async () => {
+  it("posts the metadata as the YT Music web client, signed and cookie-authenticated, returning the new ID", async () => {
     const { calls, fetchImpl } = respond({ status: "STATUS_SUCCEEDED", playlistId: "PLnew" });
 
-    const playlistId = await client(fetchImpl).createPlaylist({
+    const playlistId = await client(fetchImpl, 2).createPlaylist({
       title: "Playlist Battle — Ação & Música 🎵",
       description: "Round winners",
       privacy: "UNLISTED",
@@ -47,49 +45,21 @@ describe("YtMusicPlaylistClient.createPlaylist", () => {
       "https://music.youtube.com/youtubei/v1/playlist/create?alt=json&key=AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30",
     );
     expect(call.init.method).toBe("POST");
-    expect(jsonBody(call)).toMatchObject({
+    const body = jsonBody(call);
+    expect(body).toMatchObject({
       title: "Playlist Battle — Ação & Música 🎵",
       description: "Round winners",
       privacyStatus: "UNLISTED",
     });
-  });
 
-  it("identifies itself as the YT Music web client with today's client version", async () => {
-    const { calls, fetchImpl } = respond({ status: "STATUS_SUCCEEDED", playlistId: "PLnew" });
+    // Client version is today's date, as the web client reports it.
+    const today = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+    expect(body.context).toMatchObject({ client: { clientName: "WEB_REMIX", clientVersion: `1.${today}.01.00` } });
 
-    await client(fetchImpl).createPlaylist({ title: "t", description: "d", privacy: "PUBLIC" });
-
-    const context = jsonBody(calls[0]!)["context"] as {
-      client: { clientName: string; clientVersion: string };
-    };
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const today = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
-    expect(context.client.clientName).toBe("WEB_REMIX");
-    expect(context.client.clientVersion).toBe(`1.${today}.01.00`);
-  });
-
-  it("signs the request with a SAPISIDHASH over the cookie's own SAPISID value", async () => {
-    const { calls, fetchImpl } = respond({ status: "STATUS_SUCCEEDED", playlistId: "PLnew" });
-
-    await client(fetchImpl).createPlaylist({ title: "t", description: "d", privacy: "PUBLIC" });
-
-    const headers = calls[0]!.init.headers as Record<string, string>;
-    const match = /^SAPISIDHASH (\d+)_([0-9a-f]{40})$/.exec(headers["authorization"]!);
-    expect(match).not.toBeNull();
-    const [, timestamp, digest] = match!;
-    const expected = createHash("sha1")
-      .update(`${timestamp} ${SAPISID} https://music.youtube.com`)
-      .digest("hex");
-    expect(digest).toBe(expected);
-  });
-
-  it("forwards the cookie verbatim, keeping '=' inside cookie values", async () => {
-    const { calls, fetchImpl } = respond({ status: "STATUS_SUCCEEDED", playlistId: "PLnew" });
-
-    await client(fetchImpl, 2).createPlaylist({ title: "t", description: "d", privacy: "PUBLIC" });
-
-    const headers = calls[0]!.init.headers as Record<string, string>;
+    // SAPISIDHASH over the cookie's own SAPISID value; cookie forwarded verbatim, keeping '=' inside values.
+    const headers = call.init.headers as Record<string, string>;
+    const [, timestamp, digest] = /^SAPISIDHASH (\d+)_([0-9a-f]{40})$/.exec(headers["authorization"]!) ?? [];
+    expect(digest).toBe(createHash("sha1").update(`${timestamp} ${SAPISID} https://music.youtube.com`).digest("hex"));
     expect(headers["cookie"]).toContain(`__Secure-3PAPISID=${SAPISID}`);
     expect(headers["x-goog-authuser"]).toBe("2");
     expect(headers["x-origin"]).toBe("https://music.youtube.com");
@@ -101,35 +71,25 @@ describe("YtMusicPlaylistClient.createPlaylist", () => {
     );
   });
 
-  it("classifies an expired session as an auth error", async () => {
-    const { fetchImpl } = respond({ error: { code: 401 } }, 401);
-
-    await expect(
-      client(fetchImpl).createPlaylist({ title: "t", description: "d", privacy: "PUBLIC" }),
-    ).rejects.toMatchObject({ name: "YtMusicError", kind: "auth" });
-  });
-
-  it("classifies a dialog response as gated, not as success", async () => {
-    const { fetchImpl } = respond({
-      actions: [{ showEngagementPanelEndpoint: { identifier: { tag: "captcha" } } }],
-    });
-
-    await expect(
-      client(fetchImpl).createPlaylist({ title: "t", description: "d", privacy: "PUBLIC" }),
-    ).rejects.toMatchObject({ kind: "gated", message: expect.stringContaining("captcha") });
-  });
-
-  it("rejects a write YouTube answered with a failure status", async () => {
-    const { fetchImpl } = respond({
-      status: "STATUS_FAILED",
-      error: { code: 400, message: "Invalid title" },
-    });
-
-    const err = await client(fetchImpl)
-      .createPlaylist({ title: "t", description: "d", privacy: "PUBLIC" })
-      .catch((e: unknown) => e);
+  it.each<[string, unknown, number, Record<string, unknown>]>([
+    ["an expired session as an auth error", { error: { code: 401 } }, 401, { kind: "auth" }],
+    [
+      "a dialog response as gated, not as success",
+      { actions: [{ showEngagementPanelEndpoint: { identifier: { tag: "captcha" } } }] },
+      200,
+      { kind: "gated", message: expect.stringContaining("captcha") },
+    ],
+    [
+      "a failure status as rejected",
+      { status: "STATUS_FAILED", error: { code: 400, message: "Invalid title" } },
+      200,
+      { kind: "rejected", message: expect.stringContaining("Invalid title") },
+    ],
+  ])("classifies %s", async (_case, body, status, expected) => {
+    const { fetchImpl } = respond(body, status);
+    const err = await client(fetchImpl).createPlaylist(META).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(YtMusicError);
-    expect(err).toMatchObject({ kind: "rejected", message: expect.stringContaining("Invalid title") });
+    expect(err).toMatchObject(expected);
   });
 });
 

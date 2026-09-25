@@ -1,7 +1,15 @@
 import type { MastodonClient, RequestOptions } from "./client.js";
 import type { Game, Player, Tune } from "../game/types.js";
-import { abbreviatePollOption, assertPostLength, dedupePollOptions, sanitizeTitleForPost, truncatePost, truncatePostWithSuffix } from "../templates/truncate.js";
+import {
+  abbreviatePollOption,
+  assertPostLength,
+  dedupePollOptions,
+  sanitizeTitleForPost,
+  truncate,
+  truncatePostWithSuffix,
+} from "../templates/truncate.js";
 import { m } from "../i18n/index.js";
+import { byStanding } from "../game/scoring.js";
 
 /**
  * Outbound Mastodon posting: round threads, polls, resolution, finale, side effects.
@@ -18,11 +26,12 @@ export type PostRoundResult = {
 
 async function postStatus(
   client: MastodonClient,
-  body: { status: string; in_reply_to_id?: string; visibility?: string; poll?: unknown },
+  body: { status: string; in_reply_to_id?: string; poll?: unknown },
   options: RequestOptions = {},
 ): Promise<{ id: string; poll?: { id: string; expires_at?: string } }> {
   assertPostLength(body.status);
-  const payload: Record<string, unknown> = { status: body.status, visibility: body.visibility ?? "public" };
+  // Key order is part of the outbox ledger's idempotency check: keep it stable.
+  const payload: Record<string, unknown> = { status: body.status, visibility: "public" };
   if (body.in_reply_to_id) payload.in_reply_to_id = body.in_reply_to_id;
   if (body.poll) payload.poll = body.poll;
   return client.post<{ id: string; poll?: { id: string; expires_at?: string } }>(
@@ -34,11 +43,6 @@ async function postStatus(
 
 function acctOf(players: Player[], accountId: string): string {
   return players.find((p) => p.accountId === accountId)?.acct ?? accountId;
-}
-
-function displayName(players: Player[], accountId: string): string {
-  const p = players.find((x) => x.accountId === accountId);
-  return p?.displayName ?? p?.acct ?? accountId;
 }
 
 function roundKey(gameId: string, round: number, part: string): string {
@@ -62,7 +66,7 @@ export async function postRound(
 ): Promise<PostRoundResult> {
   const playing = players.filter((p) => roundTunes.some((t) => t.accountId === p.accountId));
 
-  const announceText = truncatePost(m().roundAnnounce(
+  const announceText = truncate(m().roundAnnounce(
     round,
     game.playlistLength,
     game.theme,
@@ -81,13 +85,10 @@ export async function postRound(
     // Sanitize the displayed title so an embedded URL inside it can't steal
     // Mastodon's preview card (first URL in text wins) from the canonical
     // YouTube link, which is what produces the video embed.
-    const lineWithoutUrl = m().tuneLine(
-      acctOf(players, t.accountId),
-      sanitizeTitleForPost(t.title),
-      "",
+    const text = truncatePostWithSuffix(
+      m().tuneLine(acctOf(players, t.accountId), sanitizeTitleForPost(t.title)),
+      t.canonicalUrl,
     );
-    const prefix = lineWithoutUrl.endsWith("\n") ? lineWithoutUrl.slice(0, -1) : lineWithoutUrl;
-    const text = truncatePostWithSuffix(prefix, t.canonicalUrl);
     const posted = await postStatus(
       client,
       { status: text, in_reply_to_id: prevId },
@@ -103,7 +104,7 @@ export async function postRound(
   const options = dedupePollOptions(
     roundTunes.map((t, i) => {
       optionMap[String(i)] = t.accountId;
-      return abbreviatePollOption(displayName(players, t.accountId), t.title);
+      return abbreviatePollOption(acctOf(players, t.accountId), t.title);
     }),
   );
 
@@ -165,19 +166,15 @@ export async function postRoundResolution(
     lines.push(m().resolutionWin(input.round, input.winnerAcct, input.potAwarded));
   }
 
-  const sorted = [...players].sort(
-    (a, b) => b.points - a.points || a.accountId.localeCompare(b.accountId),
-  );
-  lines.push(
-    m().standingsLine(sorted.map((p) => `@${p.acct} ${p.points}`).join(" · ")),
-  );
+  const sorted = [...players].sort(byStanding);
+  lines.push(m().standingsLine(sorted.map((p) => `@${p.acct} ${p.points}`).join(" · ")));
   const potAfter = input.newPot ?? game.pot;
   if (input.newPot !== undefined || game.pot > 0 || input.wasTie) {
     lines.push(m().potLine(potAfter));
   }
 
   const posted = await postStatus(client, {
-    status: truncatePost(lines.join("\n")),
+    status: truncate(lines.join("\n")),
     in_reply_to_id: game.threadRootId ?? game.id,
   }, { idempotencyKey: roundKey(game.id, input.round, "result") });
   return posted.id;
@@ -209,9 +206,7 @@ export async function postFinale(
     queueUrl: string | null;
   },
 ): Promise<string> {
-  const ordered = [...players].sort(
-    (a, b) => b.points - a.points || a.accountId.localeCompare(b.accountId),
-  );
+  const ordered = [...players].sort(byStanding);
   const champHandles = champions.map((id) => `@${acctOf(players, id)}`);
 
   const lines: string[] = [];
@@ -231,29 +226,24 @@ export async function postFinale(
 
   const summary = await postStatus(
     client,
-    { status: truncatePost(lines.join("\n")) },
+    { status: truncate(lines.join("\n")) },
     { idempotencyKey: finaleKey(game.id, "summary") },
   );
 
   // First reply: the whole battle as one link, before the per-round winners.
   if (opts.queueUrl) {
-    const queuePrefix = m().finaleQueue("").trimEnd();
     await postStatus(
       client,
-      { status: truncatePostWithSuffix(queuePrefix, opts.queueUrl), in_reply_to_id: summary.id },
+      { status: truncatePostWithSuffix(m().finaleQueue(), opts.queueUrl), in_reply_to_id: summary.id },
       { idempotencyKey: finaleKey(game.id, "queue") },
     );
   }
 
   for (const [tuneIndex, t] of winningTunes.entries()) {
-    const lineWithoutUrl = m().finaleWinningTune(
-      t.round,
-      acctOf(players, t.accountId),
-      sanitizeTitleForPost(t.title),
-      "",
+    const text = truncatePostWithSuffix(
+      m().finaleWinningTune(t.round, acctOf(players, t.accountId), sanitizeTitleForPost(t.title)),
+      t.canonicalUrl,
     );
-    const prefix = lineWithoutUrl.endsWith("\n") ? lineWithoutUrl.slice(0, -1) : lineWithoutUrl;
-    const text = truncatePostWithSuffix(prefix, t.canonicalUrl);
     await postStatus(
       client,
       { status: text, in_reply_to_id: summary.id },

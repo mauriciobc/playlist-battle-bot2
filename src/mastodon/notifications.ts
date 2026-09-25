@@ -5,7 +5,7 @@
 
 export type NotificationCursor = { lastId: string };
 
-export type MentionStatus = {
+type MentionStatus = {
   id: string;
   visibility: "public" | "unlisted" | "private" | "direct" | string;
   in_reply_to_id: string | null;

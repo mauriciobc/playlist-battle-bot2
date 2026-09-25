@@ -14,7 +14,9 @@
  *   terminal 2: npx tsx test/integration/driver-vs-mock.mts
  *
  * The endpoint is written to .mock-endpoint so the second shell needs no
- * copy-paste.
+ * copy-paste. When the bot exits (Ctrl-C), the mock prints what actually
+ * reached it - statuses, polls and per-option tallies - as evidence the
+ * driver's own report cannot fake.
  */
 import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -58,6 +60,20 @@ writeFileSync(
 );
 console.log(`mock Mastodon listening on ${url}`);
 console.log("run the driver with: npx tsx test/integration/driver-vs-mock.mts\n");
+
+process.on("exit", () => {
+  const { state } = server;
+  const polls = [...state.polls.values()].map((poll) => ({ poll, tally: state.tally(poll) }));
+  const votes = polls.reduce((n, { tally }) => n + tally.reduce((a, b) => a + b, 0), 0);
+  console.log("\n--- mock evidence ---");
+  console.log(`statuses created: ${state.statuses.size}`);
+  console.log(`polls created:    ${polls.length}`);
+  console.log(`votes cast:       ${votes}`);
+  for (const { poll, tally } of polls) {
+    const options = poll.options.map((title, i) => `${title}=${tally[i]}`).join("  ");
+    console.log(`  poll ${poll.id}: ${options}  expired=${state.pollExpired(poll)}`);
+  }
+});
 
 Object.assign(process.env, {
   MASTODON_URL: url,

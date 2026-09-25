@@ -1,8 +1,8 @@
 /**
- * A small HTTP server implementing the six Mastodon routes the bot actually
- * calls. The point is to exercise the real bot code - state machine, tune
- * collision, poll creation, vote - without depending on a live instance's
- * status-posting throttle, which is what blocked the live runs.
+ * A small HTTP server implementing the Mastodon routes the bot and the
+ * driver actually call. The point is to exercise the real bot code - state
+ * machine, tune collision, poll creation, vote - without depending on a live
+ * instance's status-posting throttle, which is what blocked the live runs.
  *
  * It is deliberately NOT a Mastodon reimplementation: no federation, no
  * timelines, no media, no moderation. The response shapes are transcribed
@@ -13,13 +13,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   MockState,
+  type Json,
   type MockAccount,
   type MockPoll,
   type MockStatus,
   type SeedNotification,
 } from "./mock-mastodon-state.js";
 
-export type MockMastodonOptions = {
+type MockMastodonOptions = {
   botAcct: string;
   hostAcct: string;
   playerAcct: string;
@@ -33,8 +34,6 @@ export type MockMastodonOptions = {
    */
   host?: string;
 };
-
-type Json = Record<string, unknown>;
 
 export class MockMastodonServer {
   readonly state: MockState;
@@ -92,10 +91,10 @@ export class MockMastodonServer {
 
   /** Test hooks - not part of the Mastodon API surface. */
 
-  pushNotification(seed: SeedNotification, recipientAcct?: string): string {
+  pushNotification(seed: SeedNotification): string {
     const state = this.state;
     const account = state.addAccount(seed.fromAcct);
-    const recipient = state.addAccount(recipientAcct ?? state.botAcct);
+    const recipient = state.addAccount(state.botAcct);
     if (recipient.id === account.id) {
       throw new Error("pushNotification cannot notify the author");
     }
@@ -107,7 +106,7 @@ export class MockMastodonServer {
 
   /** Force a poll past its expiry, the way waiting 300s otherwise would. */
   expirePoll(pollId: string): void {
-    const poll = state_get(this.state.polls, pollId);
+    const poll = this.state.polls.get(pollId);
     if (!poll) return;
     poll.expiresAt = Math.floor(Date.now() / 1000) - 1;
   }
@@ -289,7 +288,6 @@ export class MockMastodonServer {
       typeof input.in_reply_to_id === "string" ? input.in_reply_to_id : null;
 
     const pollInput = (input.poll ?? null) as Json | null;
-    let poll: MockPoll | null = null;
     if (pollInput !== null && typeof pollInput === "object") {
       const problem = this.state.validatePoll(pollInput);
       if (problem) return json(res, 422, { error: problem });
@@ -390,10 +388,6 @@ export class MockMastodonServer {
   }
 }
 
-function state_get<T>(map: Map<string, T>, key: string): T | undefined {
-  return map.get(key);
-}
-
 function bearer(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
   if (!header) return null;
@@ -422,6 +416,3 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   });
   res.end(text);
 }
-
-export { MockState };
-export type { SeedNotification };

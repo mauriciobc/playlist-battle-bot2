@@ -6,7 +6,7 @@ Rules are implemented as a pure domain layer — no I/O, no Mastodon, no DB:
 
 | Rule area | Source of truth |
 | --- | --- |
-| Lifecycle states + legal transitions | `src/game/stateMachine.ts` |
+| Lifecycle states + transitions | `src/game/types.ts` (states), `src/game/engine.ts` (transitions), `src/handlers/closure.ts` (cancel / forfeit) |
 | Create / accept / submit / finalize / resolve | `src/game/engine.ts` |
 | Points, pot, standings, ties | `src/game/scoring.ts` |
 | Eligibility, round collision detection | `src/game/types.ts` |
@@ -61,7 +61,7 @@ Worst-case game length is `acceptance + submission + (N × (poll + replacement))
 | FIZZLED | Zero complete playlists at the deadline (partials withdraw) |
 | EXPIRED | No challenger accepted within the acceptance window |
 | FORFEIT | A player account was deleted or became unreachable — closed with no champion. Precedence: deletion always causes FORFEIT (no champion), even if it would leave exactly one eligible player; walkovers never result from player disappearance. A still-open round poll is closed and its poll status removed, so no votes can land on a void game |
-| CANCELLED | The host DM'd `cancel` while the game was open — voids the game: no champion, no pot; scores are historical record only. Any live round poll is closed and its poll status removed, so no votes can land on a void game. Cancellable states are exactly the machine's `CANCEL` sources: CREATED, INVITED, COLLECTING, ROUND (a READY game is mid-transition and a FINALE game is already posting its outcome) |
+| CANCELLED | The host DM'd `cancel` while the game was open — voids the game: no champion, no pot; scores are historical record only. Any live round poll is closed and its poll status removed, so no votes can land on a void game. Cancellable states are exactly `CLOSURES.CANCEL` in `src/handlers/closure.ts`: CREATED, INVITED, COLLECTING, ROUND (a READY game is mid-transition and a FINALE game is already posting its outcome) |
 
 The finale is a new thread root: summary, final standings, one link to the whole battle — the round winners in play order, published as a saved YouTube Music playlist when the bot account is configured (`YT_COOKIE`), otherwise as an anonymous YouTube queue — then one post per round-winning tune, and the champion mention. The game then moves to `CLOSED`.
 

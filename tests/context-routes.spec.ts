@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import type { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import { AUTH, jsonOf, post, startMock, type Json } from "../test/integration/mock-kit.js";
 
 /**
  * The mock originally implemented six routes, but the driver needs two more:
@@ -12,33 +13,10 @@ import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
  *   AccountsController#statuses - a plain array of REST::StatusSerializer
  */
 
-const AUTH = { Authorization: "Bearer mock-token" };
-type Json = Record<string, unknown>;
-const jsonOf = async (res: Response) => (await res.json()) as Json;
-
-async function start() {
-  const server = new MockMastodonServer({
-    botAcct: "bot@mock.social",
-    hostAcct: "host@mock.social",
-    playerAcct: "player@mock.social",
-  });
-  await server.start();
-  return server;
-}
-
-async function post(server: MockMastodonServer, body: Json): Promise<Json> {
-  const res = await fetch(`${server.baseUrl}/api/v1/statuses`, {
-    method: "POST",
-    headers: { ...AUTH, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return jsonOf(res);
-}
-
 describe("MockMastodon: status context", () => {
   let server: MockMastodonServer;
   beforeEach(async () => {
-    server = await start();
+    server = await startMock();
   });
 
   it("returns ancestors and descendants arrays", async () => {
@@ -87,7 +65,7 @@ describe("MockMastodon: status context", () => {
 describe("MockMastodon: account statuses", () => {
   let server: MockMastodonServer;
   beforeEach(async () => {
-    server = await start();
+    server = await startMock();
   });
 
   it("returns an array of that account's statuses, newest first", async () => {

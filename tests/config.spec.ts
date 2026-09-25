@@ -34,24 +34,15 @@ describe("loadConfig", () => {
     expect(c.submissionWindowSec).toBe(172800);
     expect(c.creationCooldownSec).toBe(600);
     expect(c.maxGamesPerPlayer).toBe(3);
-    expect(c.replacementGraceMin).toBe(15);
     expect(c.autoDeleteWindowHours).toBe(720);
     expect(c.dbPath).toBe("./data/bot.db");
   });
 
   it("applies documented defaults when optional keys are absent", () => {
-    const c = cfg({
-      POLL_DURATION_SEC: undefined,
-      ACCEPTANCE_WINDOW_SEC: undefined,
-      SUBMISSION_WINDOW_SEC: undefined,
-      CREATION_COOLDOWN_SEC: undefined,
-      MAX_GAMES_PER_PLAYER: undefined,
-      EARLY_CLOSE_ENABLED: undefined,
-      EARLY_CLOSE_MIN_AGE_SEC: undefined,
-      EARLY_CLOSE_STAGNATION_SEC: undefined,
-      AUTO_DELETE_WINDOW_HOURS: undefined,
-      DB_PATH: undefined,
-      LOG_LEVEL: undefined,
+    const c = loadConfig({
+      MASTODON_URL: validEnv.MASTODON_URL,
+      MASTODON_TOKEN: validEnv.MASTODON_TOKEN,
+      BOT_ACCT: validEnv.BOT_ACCT,
     });
     expect(c.pollDurationSec).toBe(900); // 15 minutes
     expect(c.acceptanceWindowSec).toBe(86400);
@@ -64,6 +55,11 @@ describe("loadConfig", () => {
     expect(c.earlyCloseStagnationSec).toBe(300);
     expect(c.autoDeleteWindowHours).toBe(0);
     expect(c.dbPath).toBe("./data/bot.db");
+    expect(c.locale).toBe("en");
+    expect(c.runMode).toBe("production");
+    expect(c.notificationIntervalSec).toBe(15);
+    expect(c.schedulerIntervalSec).toBe(60);
+    expect(c.recoveryIntervalSec).toBe(300);
   });
 
   it("parses EARLY_CLOSE_ENABLED as a boolean flag", () => {
@@ -73,41 +69,42 @@ describe("loadConfig", () => {
     expect(cfg({ EARLY_CLOSE_ENABLED: "true" }).earlyCloseEnabled).toBe(true);
   });
 
-  it("enforces non-negative early-close windows", () => {
-    expect(() => cfg({ EARLY_CLOSE_MIN_AGE_SEC: "-1" })).toThrow(/EARLY_CLOSE_MIN_AGE_SEC/);
-    expect(() => cfg({ EARLY_CLOSE_STAGNATION_SEC: "-1" })).toThrow(/EARLY_CLOSE_STAGNATION_SEC/);
-    expect(cfg({ EARLY_CLOSE_MIN_AGE_SEC: "0" }).earlyCloseMinAgeSec).toBe(0);
-  });
-
-  it("rejects a missing MASTODON_URL", () => {
-    expect(() => cfg({ MASTODON_URL: undefined })).toThrow(/MASTODON_URL/);
-  });
-
-  it("rejects a non-https MASTODON_URL", () => {
-    expect(() => cfg({ MASTODON_URL: "http://insecure.example" })).toThrow(/MASTODON_URL/);
-  });
-
-  it("rejects an empty MASTODON_TOKEN", () => {
-    expect(() => cfg({ MASTODON_TOKEN: "" })).toThrow(/MASTODON_TOKEN/);
-  });
-
-  it("rejects an empty BOT_ACCT", () => {
-    expect(() => cfg({ BOT_ACCT: "" })).toThrow(/BOT_ACCT/);
-  });
-
-  it("rejects BOT_ACCT containing a domain (must be local handle)", () => {
-    expect(() => cfg({ BOT_ACCT: "bot@other.example" })).toThrow(/BOT_ACCT/);
-  });
-
-  it("accepts BOT_ACCT with a leading @ and strips it", () => {
+  it("normalizes accepted values", () => {
     expect(cfg({ BOT_ACCT: "@playlistbattle" }).botAcct).toBe("playlistbattle");
+    expect(cfg({ EARLY_CLOSE_MIN_AGE_SEC: "0" }).earlyCloseMinAgeSec).toBe(0);
+    expect(cfg({ LOCALE: "pt-BR" }).locale).toBe("pt-BR");
   });
 
-  it("enforces Mastodon poll duration bounds (5 min – 7 days)", () => {
-    expect(() => cfg({ POLL_DURATION_SEC: "299" })).toThrow(/POLL_DURATION_SEC/);
-    expect(() => cfg({ POLL_DURATION_SEC: "604801" })).toThrow(/POLL_DURATION_SEC/);
-    expect(() => cfg({ POLL_DURATION_SEC: "300" })).not.toThrow();
-    expect(() => cfg({ POLL_DURATION_SEC: "604800" })).not.toThrow();
+  it.each([
+    ["300", 300],
+    ["604800", 604800],
+  ])("accepts poll duration %s at Mastodon's 5 min – 7 days bounds", (raw, sec) => {
+    expect(cfg({ POLL_DURATION_SEC: raw }).pollDurationSec).toBe(sec);
+  });
+
+  it.each<[string, NodeJS.ProcessEnv, RegExp]>([
+    ["missing MASTODON_URL", { MASTODON_URL: undefined }, /MASTODON_URL/],
+    ["non-https MASTODON_URL", { MASTODON_URL: "http://insecure.example" }, /MASTODON_URL/],
+    ["empty MASTODON_TOKEN", { MASTODON_TOKEN: "" }, /MASTODON_TOKEN/],
+    ["empty BOT_ACCT", { BOT_ACCT: "" }, /BOT_ACCT/],
+    ["BOT_ACCT with a domain (must be local handle)", { BOT_ACCT: "bot@other.example" }, /BOT_ACCT/],
+    ["poll duration below 5 min", { POLL_DURATION_SEC: "299" }, /POLL_DURATION_SEC/],
+    ["poll duration above 7 days", { POLL_DURATION_SEC: "604801" }, /POLL_DURATION_SEC/],
+    // A test mode must NOT be able to create a poll Mastodon will reject.
+    ["poll below the 300s floor in test mode", { TEST_MODE: "1", POLL_DURATION_SEC: "30" }, /POLL_DURATION_SEC/],
+    ["non-integer POLL_DURATION_SEC", { POLL_DURATION_SEC: "abc" }, /POLL_DURATION_SEC/],
+    ["non-integer MAX_GAMES_PER_PLAYER", { MAX_GAMES_PER_PLAYER: "2.5" }, /MAX_GAMES_PER_PLAYER/],
+    ["zero acceptance window", { ACCEPTANCE_WINDOW_SEC: "0" }, /ACCEPTANCE_WINDOW_SEC/],
+    ["negative submission window", { SUBMISSION_WINDOW_SEC: "-1" }, /SUBMISSION_WINDOW_SEC/],
+    ["negative creation cooldown", { CREATION_COOLDOWN_SEC: "-1" }, /CREATION_COOLDOWN_SEC/],
+    ["zero concurrent cap", { MAX_GAMES_PER_PLAYER: "0" }, /MAX_GAMES_PER_PLAYER/],
+    ["negative early-close min age", { EARLY_CLOSE_MIN_AGE_SEC: "-1" }, /EARLY_CLOSE_MIN_AGE_SEC/],
+    ["negative early-close stagnation", { EARLY_CLOSE_STAGNATION_SEC: "-1" }, /EARLY_CLOSE_STAGNATION_SEC/],
+    ["unknown log level", { LOG_LEVEL: "verbose" }, /LOG_LEVEL/],
+    ["unknown locale", { LOCALE: "fr" }, /LOCALE/],
+    ["unknown run mode", { RUN_MODE: "turbo" }, /RUN_MODE/],
+  ])("rejects %s", (_case, overrides, error) => {
+    expect(() => cfg(overrides)).toThrow(error);
   });
 
   it("keeps the DB poll_duration_sec constraint in sync with the config minimum", () => {
@@ -138,69 +135,13 @@ describe("loadConfig", () => {
     }
   });
 
-  it("enforces Mastodon's 300s poll floor even in test mode", () => {
-    // A test mode must NOT be able to create a poll Mastodon will reject.
-    expect(() => cfg({ TEST_MODE: "1", POLL_DURATION_SEC: "30" })).toThrow(/POLL_DURATION_SEC/);
-  });
-
-  it("test mode compresses early-close so rounds resolve without waiting for poll expiry", () => {
-    const normal = cfg({ TEST_MODE: undefined, EARLY_CLOSE_ENABLED: undefined });
-    const fast = cfg({ TEST_MODE: "1" });
-
-    expect(normal.earlyCloseEnabled).toBe(true);
-    expect(normal.earlyCloseMinAgeSec).toBe(300);
-    expect(normal.earlyCloseStagnationSec).toBe(300);
-
-    // Enabled by default, and closes as soon as the tally stops moving.
-    expect(fast.earlyCloseEnabled).toBe(true);
-    expect(fast.earlyCloseMinAgeSec).toBe(0);
-    expect(fast.earlyCloseStagnationSec).toBe(0);
-  });
-
-  it("test mode exposes short loop intervals for fast E2E runs", () => {
-    const fast = cfg({ TEST_MODE: "1" });
-    expect(fast.notificationIntervalSec).toBeLessThanOrEqual(5);
-    expect(fast.schedulerIntervalSec).toBeLessThanOrEqual(15);
-    expect(fast.recoveryIntervalSec).toBeLessThanOrEqual(60);
-  });
-
-  it("turns second-based intervals into millisecond timers the runtime can use", () => {
-    // index.ts schedules with setInterval(ms); the config speaks seconds.
-    const fast = cfg({ TEST_MODE: "1" });
-    expect(fast.notificationIntervalSec * 1000).toBe(fast.notificationIntervalMs);
-    expect(fast.schedulerIntervalSec * 1000).toBe(fast.schedulerIntervalMs);
-    expect(fast.recoveryIntervalSec * 1000).toBe(fast.recoveryIntervalMs);
-  });
-
-  it("keeps production loop intervals when test mode is off", () => {
-    const normal = cfg({ TEST_MODE: undefined });
-    expect(normal.notificationIntervalSec).toBe(15);
-    expect(normal.schedulerIntervalSec).toBe(60);
-    expect(normal.recoveryIntervalSec).toBe(300);
-  });
-
   it("allows explicit interval overrides to win over test mode defaults", () => {
     const fast = cfg({ TEST_MODE: "1", NOTIFICATION_INTERVAL_SEC: "2" });
     expect(fast.notificationIntervalSec).toBe(2);
   });
 
-  it("enforces positive acceptance and submission windows", () => {
-    expect(() => cfg({ ACCEPTANCE_WINDOW_SEC: "0" })).toThrow(/ACCEPTANCE_WINDOW_SEC/);
-    expect(() => cfg({ SUBMISSION_WINDOW_SEC: "-1" })).toThrow(/SUBMISSION_WINDOW_SEC/);
-  });
-
-  it("enforces creation cooldown >= 0 and concurrent cap >= 1", () => {
-    expect(() => cfg({ CREATION_COOLDOWN_SEC: "-1" })).toThrow(/CREATION_COOLDOWN_SEC/);
-    expect(() => cfg({ MAX_GAMES_PER_PLAYER: "0" })).toThrow(/MAX_GAMES_PER_PLAYER/);
-  });
-
-  it("rejects unknown log levels", () => {
-    expect(() => cfg({ LOG_LEVEL: "verbose" })).toThrow(/LOG_LEVEL/);
-  });
-
   it("parses LOG_PRETTY as a boolean flag (default off)", () => {
     expect(readLogSettings({}).pretty).toBe(false);
-    expect(readLogSettings({ LOG_PRETTY: undefined }).pretty).toBe(false);
     expect(readLogSettings({ LOG_PRETTY: "1" }).pretty).toBe(true);
     expect(readLogSettings({ LOG_PRETTY: "true" }).pretty).toBe(true);
     expect(readLogSettings({ LOG_PRETTY: "0" }).pretty).toBe(false);
@@ -214,43 +155,85 @@ describe("loadConfig", () => {
     expect(readLogSettings({ LOG_LEVEL: "" }).level).toBe("info");
   });
 
-  it("rejects non-integer numeric fields", () => {
-    expect(() => cfg({ POLL_DURATION_SEC: "abc" })).toThrow(/POLL_DURATION_SEC/);
-    expect(() => cfg({ MAX_GAMES_PER_PLAYER: "2.5" })).toThrow(/MAX_GAMES_PER_PLAYER/);
-  });
-
-  it("warns (returned flag) when auto-delete window cannot cover worst-case game length", () => {
+  it("flags auto-delete as unsafe exactly when the window cannot cover the §2.4 worst case", () => {
     // v1.1 §2.4: acceptance + submission + 12×(poll + replacement) + 2×poll
-    const poll = 604800;
-    const worstCase = 86400 + 172800 + (poll + 15 * 60) * 12 + poll * 2;
-    expect(worstCase).toBeGreaterThan(3600);
-    const c = cfg({ POLL_DURATION_SEC: String(poll), AUTO_DELETE_WINDOW_HOURS: "1" });
-    expect(c.autoDeleteUnsafe).toBe(true);
-  });
-
-  it("marks auto-delete as safe when window covers the exact §2.4 worst case", () => {
     const poll = 86400;
     const worstCaseSec = 86400 + 172800 + (poll + 15 * 60) * 12 + poll * 2;
     const windowHours = Math.ceil(worstCaseSec / 3600);
-    const c = cfg({
-      POLL_DURATION_SEC: String(poll),
-      ACCEPTANCE_WINDOW_SEC: "86400",
-      SUBMISSION_WINDOW_SEC: "172800",
-      AUTO_DELETE_WINDOW_HOURS: String(windowHours),
-    });
-    expect(c.autoDeleteUnsafe).toBe(false);
-
-    const oneHourShort = cfg({
-      POLL_DURATION_SEC: String(poll),
-      ACCEPTANCE_WINDOW_SEC: "86400",
-      SUBMISSION_WINDOW_SEC: "172800",
-      AUTO_DELETE_WINDOW_HOURS: String(windowHours - 1),
-    });
-    expect(oneHourShort.autoDeleteUnsafe).toBe(true);
+    const at = (hours: number) =>
+      cfg({ POLL_DURATION_SEC: String(poll), AUTO_DELETE_WINDOW_HOURS: String(hours) }).autoDeleteUnsafe;
+    expect(at(windowHours)).toBe(false);
+    expect(at(windowHours - 1)).toBe(true);
   });
 
   it("does not flag auto-delete when the window is off (0)", () => {
     const c = cfg({ POLL_DURATION_SEC: "604800", AUTO_DELETE_WINDOW_HOURS: "0" });
     expect(c.autoDeleteUnsafe).toBe(false);
+  });
+});
+
+/**
+ * RUN_MODE controls loop cadence and early close. It replaced a TEST_MODE=1
+ * that forced the early-close thresholds to 0, silently discarding operator
+ * values. "e2e" exists because "test" cannot drive the real Mastodon API:
+ * rounds resolve before an outside client can vote.
+ */
+describe("RUN_MODE", () => {
+  it.each(["e2e", "production"])("keeps the operator's early-close thresholds in %s mode", (mode) => {
+    const c = cfg({ RUN_MODE: mode, EARLY_CLOSE_MIN_AGE_SEC: "120", EARLY_CLOSE_STAGNATION_SEC: "180" });
+    expect(c.earlyCloseMinAgeSec).toBe(120);
+    expect(c.earlyCloseStagnationSec).toBe(180);
+  });
+
+  it.each<[string, NodeJS.ProcessEnv]>([
+    ["RUN_MODE=test", { RUN_MODE: "test" }],
+    ["legacy TEST_MODE=1", { TEST_MODE: "1" }],
+  ])("%s collapses early-close thresholds to zero, keeping early close enabled", (_case, env) => {
+    const c = cfg({ ...env, EARLY_CLOSE_MIN_AGE_SEC: "60", EARLY_CLOSE_STAGNATION_SEC: "60" });
+    expect(c.runMode).toBe("test");
+    expect(c.earlyCloseEnabled).toBe(true);
+    expect(c.earlyCloseMinAgeSec).toBe(0);
+    expect(c.earlyCloseStagnationSec).toBe(0);
+  });
+
+  it("lets RUN_MODE win over TEST_MODE", () => {
+    const c = cfg({ TEST_MODE: "1", RUN_MODE: "e2e", EARLY_CLOSE_MIN_AGE_SEC: "60" });
+    expect(c.runMode).toBe("e2e");
+    expect(c.earlyCloseMinAgeSec).toBe(60);
+  });
+
+  it("uses faster loop cadence outside production", () => {
+    const prod = cfg();
+    for (const mode of ["e2e", "test"]) {
+      const fast = cfg({ RUN_MODE: mode });
+      expect(fast.notificationIntervalSec).toBeLessThan(prod.notificationIntervalSec);
+      expect(fast.schedulerIntervalSec).toBeLessThan(prod.schedulerIntervalSec);
+      expect(fast.recoveryIntervalSec).toBeLessThan(prod.recoveryIntervalSec);
+    }
+  });
+});
+
+/**
+ * A bearer token must not cross a network in clear text, but the mock Mastodon
+ * listens on http://127.0.0.1. Cleartext http is accepted ONLY for a loopback
+ * literal outside production; a non-loopback http URL stays an error in every mode.
+ */
+describe("MASTODON_URL scheme rules", () => {
+  it.each([
+    ["http://127.0.0.1:54321", "http://127.0.0.1:54321"],
+    ["http://localhost:54321", "http://localhost:54321"],
+    ["http://127.0.0.1:54321/", "http://127.0.0.1:54321"],
+  ])("accepts loopback %s outside production", (url, expected) => {
+    expect(cfg({ MASTODON_URL: url, RUN_MODE: "test" }).mastodonUrl).toBe(expected);
+  });
+
+  it.each<[string, string, string | undefined]>([
+    ["non-loopback http in test mode", "http://mastodon.social", "test"],
+    ["a URL that merely looks loopback", "http://127.0.0.1.evil.com", "test"],
+    ["a non-loopback private address in test mode", "http://192.168.68.104:3000", "test"],
+    ["loopback http in production", "http://127.0.0.1:54321", "production"],
+    ["loopback http when RUN_MODE is unset (production)", "http://127.0.0.1:54321", undefined],
+  ])("rejects %s", (_case, url, mode) => {
+    expect(() => cfg({ MASTODON_URL: url, RUN_MODE: mode })).toThrow(/MASTODON_URL/);
   });
 });

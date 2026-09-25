@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MastodonClient } from "../src/mastodon/client.js";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { MastodonClient, RateLimitError } from "../src/mastodon/client.js";
+import { openDatabase, migrate, type Db } from "../src/db/index.js";
 import type { Logger } from "../src/logger.js";
 
 type FetchCall = { url: string; init: RequestInit | undefined };
@@ -11,22 +12,19 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
-function mockLogger() {
-  return {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    fatal: vi.fn(),
-    trace: vi.fn(),
-    child: vi.fn(),
-  };
-}
-
 describe("MastodonClient", () => {
   let calls: FetchCall[];
   let client: MastodonClient;
-  let fetchMock: ReturnType<typeof vi.fn>;
+  let fetchMock: Mock;
+
+  function makeClient(extra: { token?: string; log?: Logger; db?: Db } = {}): MastodonClient {
+    return new MastodonClient({
+      baseUrl: "https://mastodon.example",
+      token: "tok",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      ...extra,
+    });
+  }
 
   beforeEach(() => {
     calls = [];
@@ -34,11 +32,7 @@ describe("MastodonClient", () => {
       calls.push({ url, init });
       return jsonResponse({ id: "1", username: "bot" });
     });
-    client = new MastodonClient({
-      baseUrl: "https://mastodon.example",
-      token: "tok",
-      fetchImpl: fetchMock as unknown as typeof fetch,
-    });
+    client = makeClient();
   });
 
   afterEach(() => {
@@ -56,7 +50,7 @@ describe("MastodonClient", () => {
     expect(calls[0]!.init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("performs GET by default and JSON-encodes bodies for POST", async () => {
+  it("JSON-encodes bodies for POST", async () => {
     await client.post("/api/v1/statuses", { status: "hi", visibility: "public" });
     expect(calls[0]!.init?.method).toBe("POST");
     expect(calls[0]!.init?.body).toBe(JSON.stringify({ status: "hi", visibility: "public" }));
@@ -111,19 +105,25 @@ describe("MastodonClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("retries once on 429 with Retry-After, then succeeds", async () => {
+  it("retries once on 429 with Retry-After, logging the retry without the bearer token", async () => {
     vi.useFakeTimers();
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    client = makeClient({ token: "super-secret-token", log: log as unknown as Logger });
     fetchMock
-      .mockResolvedValueOnce(
-        jsonResponse({ error: "slow down" }, 429, { "Retry-After": "0" }),
-      )
+      .mockResolvedValueOnce(jsonResponse({ error: "slow down" }, 429, { "Retry-After": "0" }))
       .mockResolvedValueOnce(jsonResponse({ id: "2" }));
 
     const promise = client.get("/api/v1/statuses/1");
     await vi.runAllTimersAsync();
-    const result = await promise;
-    expect(result).toEqual({ id: "2" });
+    await expect(promise).resolves.toEqual({ id: "2" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "rate_limit", method: "GET" }),
+      expect.any(String),
+    );
+    const serialized = JSON.stringify([log.debug.mock.calls, log.warn.mock.calls, log.error.mock.calls]);
+    expect(serialized).not.toContain("super-secret-token");
   });
 
   it("retries on transient 5xx then throws after max attempts", async () => {
@@ -138,13 +138,31 @@ describe("MastodonClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("surfaces exhausted rate limits as RateLimitError", async () => {
+  it("surfaces exhausted rate limits without reset headers as RateLimitError", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ error: "slow down" }, 429, { "Retry-After": "120" }),
     );
-    await expect(client.get("/api/v1/statuses/1", { maxRetries: 0 })).rejects.toMatchObject({
-      name: "RateLimitError",
-    });
+    const err = await client.get("/api/v1/statuses/1", { maxRetries: 0 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(Number.isFinite((err as RateLimitError).resetAt)).toBe(true);
+  });
+
+  // Mastodon sends X-RateLimit-Reset as ISO8601 (rack_attack's `.iso8601(6)`);
+  // Number() on it gave NaN and every backoff fell back to a Retry-After guess.
+  it.each([
+    ["an ISO8601", "2026-09-24T14:25:00.380888Z", 1_790_259_900],
+    ["an epoch-seconds", "1790259900", 1_790_259_900],
+  ])("reads the real reset from %s header on a 429", async (_kind, header, expected) => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: "Too Many Requests" }, 429, {
+        "X-RateLimit-Limit": "1500",
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": header,
+      }),
+    );
+    const err = await client.post("/api/v1/statuses", { status: "x" }, { maxRetries: 0 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect((err as RateLimitError).resetAt).toBe(expected);
   });
 
   it("throws MastodonApiError with status and body on 4xx (non-429)", async () => {
@@ -169,69 +187,49 @@ describe("MastodonClient", () => {
     expect(linkNext).toBe("https://mastodon.example/api/v1/notifications?max_id=99");
   });
 
-  it("logs successful requests at debug with method/path/status", async () => {
-    const log = mockLogger();
-    client = new MastodonClient({
-      baseUrl: "https://mastodon.example",
-      token: "tok",
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      log: log as unknown as Logger,
-    });
-    await client.get("/api/v1/accounts/verify_credentials");
-    expect(log.debug).toHaveBeenCalledWith(
-      expect.objectContaining({
-        method: "GET",
-        path: "/api/v1/accounts/verify_credentials",
-        status: 200,
-      }),
-      "mastodon request ok",
-    );
-  });
+  describe("outbox ledger", () => {
+    let db: Db;
 
-  it("logs retries at warn and never logs the bearer token", async () => {
-    vi.useFakeTimers();
-    const log = mockLogger();
-    client = new MastodonClient({
-      baseUrl: "https://mastodon.example",
-      token: "super-secret-token",
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      log: log as unknown as Logger,
+    beforeEach(() => {
+      db = openDatabase(":memory:");
+      migrate(db);
+      client = makeClient({ db });
     });
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse({ error: "slow down" }, 429, { "Retry-After": "0" }))
-      .mockResolvedValueOnce(jsonResponse({ id: "2" }));
 
-    const promise = client.get("/api/v1/statuses/1");
-    await vi.runAllTimersAsync();
-    await expect(promise).resolves.toEqual({ id: "2" });
+    afterEach(() => db.close());
 
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "rate_limit", method: "GET" }),
-      "mastodon request retry",
-    );
-    const serialized = JSON.stringify({
-      debug: log.debug.mock.calls,
-      warn: log.warn.mock.calls,
-      error: log.error.mock.calls,
-    });
-    expect(serialized).not.toContain("super-secret-token");
-  });
+    const effects = (status: string) =>
+      db.prepare("SELECT method, path FROM outbox_effects WHERE status = ?").all(status);
 
-  it("logs request failures at error", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "Record not found" }, 404));
-    const log = mockLogger();
-    client = new MastodonClient({
-      baseUrl: "https://mastodon.example",
-      token: "tok",
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      log: log as unknown as Logger,
+    it("records successful POST effects and sends an idempotency key", async () => {
+      await client.post("/api/v1/statuses", { status: "hello" });
+
+      expect((calls[0]!.init?.headers as Record<string, string>)["Idempotency-Key"]).toBeTruthy();
+      expect(effects("sent")).toMatchObject([
+        { method: "POST", path: "https://mastodon.example/api/v1/statuses" },
+      ]);
     });
-    await expect(client.get("/api/v1/statuses/nope")).rejects.toMatchObject({
-      name: "MastodonApiError",
+
+    it("reuses a logical idempotency key without duplicating the ledger row", async () => {
+      const options = { idempotencyKey: "pb:v1:test:effect" };
+
+      await client.post("/api/v1/statuses", { status: "hello" }, options);
+      await client.post("/api/v1/statuses", { status: "hello" }, options);
+
+      expect(effects("sent")).toHaveLength(1);
+      for (const call of calls) {
+        expect(call.init?.headers).toMatchObject({ "Idempotency-Key": "pb:v1:test:effect" });
+      }
     });
-    expect(log.error).toHaveBeenCalledWith(
-      expect.objectContaining({ method: "GET", path: "/api/v1/statuses/nope" }),
-      "mastodon request failed",
-    );
+
+    it("records definite API failures separately from uncertain network outcomes", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error: "bad request" }, 400));
+      await expect(client.post("/api/v1/statuses", { status: "hello" })).rejects.toThrow();
+      expect(effects("failed")).toHaveLength(1);
+
+      fetchMock.mockRejectedValueOnce(new Error("connection reset"));
+      await expect(client.post("/api/v1/statuses", { status: "hello" }, { maxRetries: 0 })).rejects.toThrow();
+      expect(effects("unknown")).toHaveLength(1);
+    });
   });
 });

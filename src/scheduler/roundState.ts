@@ -1,22 +1,22 @@
 import type { Db } from "../db/index.js";
 import type { HandlerDeps } from "../handlers/mention.js";
 import { MastodonApiError } from "../mastodon/client.js";
-import { eligibleForRound, hasRoundCollision, isTerminal } from "../game/types.js";
-import { computeStandings } from "../game/scoring.js";
+import { eligibleForRound, hasRoundCollision, isTerminal, type Tune } from "../game/types.js";
+import { champions } from "../game/scoring.js";
 import { mulberry32, roundSeed, seededShuffle } from "../game/shuffle.js";
 import {
+  RESOLVED_ROUND_STATUSES,
   loadGame,
   loadPlayers,
   loadTunes,
   loadRound,
   loadRoundWinners,
   roundMeta,
-  saveAutoTieRound,
   saveBattlePlaylistId,
   savePollRound,
-  saveWalkoverRound,
+  setGameStatus,
+  type RoundMeta,
 } from "../game/store.js";
-import type { RoundMeta } from "../game/store.js";
 import { postRound, postRoundResolution, postFinale, type TallyInput } from "../mastodon/posts.js";
 import { dm } from "../mastodon/dm.js";
 import { handlePlayerDeleted } from "../handlers/closure.js";
@@ -30,182 +30,150 @@ import { m } from "../i18n/index.js";
  */
 
 /**
- * In-process claim per (game, round): the availability window re-entry, the
- * 60s deadline sweep, the poll fast-path and emitRound can race. Whoever fails
- * to claim defers to the holder.
+ * In-process claims: the availability window re-entry, the deadline sweep,
+ * the poll fast-path and emitRound can race for the same round/finale/poll.
+ * Whoever fails to claim defers to the holder. Scoped to this process —
+ * sufficient for the single-container deployment; two processes sharing one
+ * SQLite file would need a database-level lease instead.
  */
-const emittingRounds = new Set<string>();
-const emittingFinales = new Set<string>();
+const claims = new Set<string>();
 
-function claimEmit(gameId: string, round: number): boolean {
-  const key = `${gameId}#${round}`;
-  if (emittingRounds.has(key)) return false;
-  emittingRounds.add(key);
-  return true;
+export function isClaimed(key: string): boolean {
+  return claims.has(key);
 }
 
-function releaseEmit(gameId: string, round: number): void {
-  emittingRounds.delete(`${gameId}#${round}`);
+export async function exclusively(key: string, task: () => Promise<void>): Promise<void> {
+  if (claims.has(key)) return;
+  claims.add(key);
+  try {
+    await task();
+  } finally {
+    claims.delete(key);
+  }
+}
+
+function isLiveRound(db: Db, gameId: string, round: number): boolean {
+  const game = loadGame(db, gameId);
+  return game?.status === "ROUND" && game.currentRound === round;
 }
 
 /**
  * Final round resolved → move game to FINALE, post finale thread, mark CLOSED.
  */
-export async function advanceToFinaleIfFinal(
-  handler: HandlerDeps,
-  gameId: string,
-  now: Date,
-): Promise<void> {
+async function advanceToFinaleIfFinal(handler: HandlerDeps, gameId: string): Promise<void> {
   const current = loadGame(handler.db, gameId);
   if (!current) return;
-  if (current.status === "FINALE") {
-    await emitFinale(handler, gameId);
+  if (current.status !== "FINALE") {
+    if (current.status !== "ROUND" && current.status !== "READY") return;
+    if (!setGameStatus(handler.db, gameId, current.status, "FINALE", handler.now())) return;
+  }
+  await emitFinale(handler, gameId);
+}
+
+/**
+ * After `round` resolved (poll, auto-tie or walkover): emit the next round or
+ * the finale. Idempotent, so recovery sweeps can call it again.
+ */
+export async function advanceAfterRound(handler: HandlerDeps, gameId: string, round: number): Promise<void> {
+  const game = loadGame(handler.db, gameId);
+  if (!game || isTerminal(game.status)) return;
+  if (round >= game.playlistLength) {
+    await advanceToFinaleIfFinal(handler, gameId);
     return;
   }
-  if (current.status !== "ROUND" && current.status !== "READY") return;
-  const changed = handler.db
-    .prepare("UPDATE games SET status = 'FINALE', updated_at = ? WHERE id = ? AND status = ?")
-    .run(now.toISOString(), gameId, current.status);
-  if (changed.changes === 0) return;
-  await emitFinale(handler, gameId);
+  if (game.currentRound === round) {
+    const changed = handler.db
+      .prepare(
+        "UPDATE games SET current_round = ?, updated_at = ? WHERE id = ? AND status = 'ROUND' AND current_round = ?",
+      )
+      .run(round + 1, handler.now().toISOString(), gameId, round);
+    if (changed.changes !== 1) return;
+  } else if (game.currentRound !== round + 1) {
+    return;
+  }
+  await emitRound(handler, gameId, round + 1);
 }
 
 /** Post round thread + poll (or auto-tie/walkover) for the given round. Persists rounds row. */
 export async function emitRound(handler: HandlerDeps, gameId: string, round: number): Promise<void> {
-  if (!claimEmit(gameId, round)) return;
-  try {
-    await emitRoundInner(handler, gameId, round);
-  } finally {
-    releaseEmit(gameId, round);
-  }
+  await exclusively(`round:${gameId}#${round}`, () => emitRoundInner(handler, gameId, round));
 }
 
 async function emitRoundInner(handler: HandlerDeps, gameId: string, round: number): Promise<void> {
   const db = handler.db;
-  const game = loadGame(db, gameId);
-  if (!game || game.status !== "ROUND" || game.currentRound !== round) return;
-  const players = loadPlayers(db, gameId);
-  const allTunes = loadTunes(db, gameId);
+  if (!isLiveRound(db, gameId, round)) return;
 
   let excluded = new Set<string>();
-  const preliminaryEligible = eligibleForRound(players, allTunes, round);
+  const preliminaryEligible = eligibleForRound(loadPlayers(db, gameId), loadTunes(db, gameId), round);
   if (preliminaryEligible.length > 0) {
-    const windowOutcome = await ensureAvailability(handler, gameId, round, preliminaryEligible, allTunes);
+    const windowOutcome = await ensureAvailability(handler, gameId, round, preliminaryEligible);
     if (windowOutcome.kind !== "ready") {
       // Aborted means the game went terminal (unreachable player → FORFEIT) —
       // never publish a round thread onto a void game.
-      if (windowOutcome.kind === "aborted") dropAnnouncedRound(db, gameId, round);
+      if (windowOutcome.kind === "aborted") {
+        db.prepare("DELETE FROM rounds WHERE game_id = ? AND number = ? AND status = 'announced'").run(gameId, round);
+      }
       return;
     }
     excluded = windowOutcome.excluded;
   }
 
   const liveGame = loadGame(db, gameId);
-  if (!liveGame || liveGame.status !== "ROUND" || liveGame.currentRound !== round) return;
+  if (liveGame?.status !== "ROUND" || liveGame.currentRound !== round) return;
   const livePlayers = loadPlayers(db, gameId);
   const liveTunes = loadTunes(db, gameId);
   const eligible = eligibleForRound(livePlayers, liveTunes, round, excluded);
   const roundTunes = liveTunes
     .filter((t) => t.position === round && eligible.includes(t.accountId))
     .sort((a, b) => eligible.indexOf(a.accountId) - eligible.indexOf(b.accountId));
+  const pot = liveGame.pot;
 
   // Walkover: only one player remains in this round (PRD §7 / v1.1 1.4)
   if (eligible.length <= 1) {
     const winner = eligible[0] ?? null;
-    const potAwarded = liveGame.pot;
-    const resolutionInput: TallyInput = {
-      round,
-      winnerAcct: winner
-        ? livePlayers.find((p) => p.accountId === winner)?.acct ?? winner
-        : null,
-      potAwarded,
-      wasTie: false,
-      walkover: true,
-      newPot: winner ? 0 : potAwarded,
-    };
-    const committed = db.transaction(() => {
-      const liveGame = loadGame(db, gameId);
-      if (!liveGame || liveGame.status !== "ROUND" || liveGame.currentRound !== round) return false;
-      saveWalkoverRound(db, gameId, round, winner, eligible, JSON.stringify(resolutionInput));
-      if (winner) {
-        db.prepare("UPDATE players SET points = points + ? WHERE game_id = ? AND account_id = ?").run(
-          potAwarded, gameId, winner,
-        );
-        db.prepare("UPDATE games SET pot = 0 WHERE id = ?").run(gameId);
-      }
-      return true;
-    })();
-    if (!committed) return;
-    if (!await postRoundResult(handler, gameId, round, resolutionInput)) return;
-    await advanceAfterRound(handler, gameId, round);
+    await resolveWithoutPoll(handler, gameId, round, {
+      status: "walkover",
+      winner,
+      awards: winner ? [[winner, pot]] : [],
+      pot: winner ? 0 : pot,
+      meta: { participants: eligible },
+      input: {
+        round,
+        winnerAcct: winner ? livePlayers.find((p) => p.accountId === winner)?.acct ?? winner : null,
+        potAwarded: pot,
+        wasTie: false,
+        walkover: true,
+        newPot: winner ? 0 : pot,
+      },
+    });
     return;
   }
 
   // Auto-tie: identical video across players → no poll (PRD §5.6)
   if (hasRoundCollision(roundTunes, round)) {
-    const isFinal = round >= liveGame.playlistLength;
-    if (isFinal) {
+    if (round >= liveGame.playlistLength) {
       // v1.1 1.3: final-round auto-tie splits the pre-round pot among all
       // round participants (no poll ran, so everyone is "tied").
-      const tiedIds = eligible;
-      const pot = liveGame.pot;
-      const count = tiedIds.length;
-      const each = count > 0 ? Math.floor(pot / count) : 0;
-      const total = each * count;
-      const resolutionInput: TallyInput = {
-        round,
-        winnerAcct: null,
-        potAwarded: 0,
-        wasTie: true,
-        newPot: 0,
-        potSplit: total > 0 ? { total, each, count } : null,
-      };
-      const committed = db.transaction(() => {
-        const liveGame = loadGame(db, gameId);
-        if (!liveGame || liveGame.status !== "ROUND" || liveGame.currentRound !== round) return false;
-        if (total > 0) {
-          for (const id of tiedIds) {
-            db.prepare("UPDATE players SET points = points + ? WHERE game_id = ? AND account_id = ?").run(
-              each, gameId, id,
-            );
-          }
-        }
-        db.prepare("UPDATE games SET pot = 0 WHERE id = ?").run(gameId);
-        saveAutoTieRound(
-          db,
-          gameId,
-          round,
-          total > 0
-            ? { finalSplit: { total, each, count }, participants: tiedIds }
-            : { participants: tiedIds },
-          JSON.stringify(resolutionInput),
-        );
-        return true;
-      })();
-      if (!committed) return;
-      if (!await postRoundResult(handler, gameId, round, resolutionInput)) return;
-      await advanceAfterRound(handler, gameId, round);
+      const each = Math.floor(pot / eligible.length);
+      const split = each > 0 ? { total: each * eligible.length, each, count: eligible.length } : null;
+      await resolveWithoutPoll(handler, gameId, round, {
+        status: "auto_tied",
+        winner: null,
+        awards: split ? eligible.map((id) => [id, each]) : [],
+        pot: 0,
+        meta: split ? { finalSplit: split, participants: eligible } : { participants: eligible },
+        input: { round, winnerAcct: null, potAwarded: 0, wasTie: true, newPot: 0, potSplit: split },
+      });
       return;
     }
-    const newPot = liveGame.pot + 1;
-    const tiedIds = eligible;
-    const resolutionInput: TallyInput = {
-      round,
-      winnerAcct: null,
-      potAwarded: 0,
-      wasTie: true,
-      newPot,
-    };
-    const committed = db.transaction(() => {
-      const liveGame = loadGame(db, gameId);
-      if (!liveGame || liveGame.status !== "ROUND" || liveGame.currentRound !== round) return false;
-      saveAutoTieRound(db, gameId, round, { participants: tiedIds }, JSON.stringify(resolutionInput));
-      db.prepare("UPDATE games SET pot = ? WHERE id = ?").run(newPot, gameId);
-      return true;
-    })();
-    if (!committed) return;
-    if (!await postRoundResult(handler, gameId, round, resolutionInput)) return;
-    await advanceAfterRound(handler, gameId, round);
+    await resolveWithoutPoll(handler, gameId, round, {
+      status: "auto_tied",
+      winner: null,
+      awards: [],
+      pot: pot + 1,
+      meta: { participants: eligible },
+      input: { round, winnerAcct: null, potAwarded: 0, wasTie: true, newPot: pot + 1 },
+    });
     return;
   }
 
@@ -218,10 +186,7 @@ async function emitRoundInner(handler: HandlerDeps, gameId: string, round: numbe
 
   const result = await postRound(handler.client, liveGame, livePlayers, shuffled, round);
   const persisted = db.transaction(() => {
-    const liveGame = loadGame(db, gameId);
-    const row = loadRound(db, gameId, round);
-    if (!row || row.status !== "announced") return false;
-    const pending = !liveGame || liveGame.status !== "ROUND" || liveGame.currentRound !== round;
+    if (loadRound(db, gameId, round)?.status !== "announced") return false;
     return savePollRound(
       db,
       gameId,
@@ -230,46 +195,51 @@ async function emitRoundInner(handler: HandlerDeps, gameId: string, round: numbe
       result.pollId,
       result.pollExpiresAt,
       result.optionMap,
-      pending,
+      !isLiveRound(db, gameId, round),
     );
   })();
   if (!persisted) {
     try {
       await handler.client.delete(`/api/v1/statuses/${result.pollStatusId}`);
     } catch {
-      return;
+      // Orphaned poll: nothing references it any more.
     }
   }
 }
 
-/** After a round resolves (or auto-ties/walks over): next round or finale. */
-async function advanceAfterRound(handler: HandlerDeps, gameId: string, finishedRound: number): Promise<void> {
+/** Persist a round decided without a poll (walkover / auto-tie), post its result, move on. */
+async function resolveWithoutPoll(
+  handler: HandlerDeps,
+  gameId: string,
+  round: number,
+  r: {
+    status: "walkover" | "auto_tied";
+    winner: string | null;
+    awards: [accountId: string, points: number][];
+    pot: number;
+    meta: RoundMeta;
+    input: TallyInput;
+  },
+): Promise<void> {
   const db = handler.db;
-  const game = loadGame(db, gameId)!;
-  if (finishedRound >= game.playlistLength) {
-    await advanceToFinaleIfFinal(handler, gameId, handler.now());
-    return;
-  }
-  const changed = db.prepare(
-    "UPDATE games SET current_round = ?, updated_at = ? WHERE id = ? AND status = 'ROUND' AND current_round = ?",
-  ).run(
-    finishedRound + 1, handler.now().toISOString(), gameId, finishedRound,
-  );
-  if (changed.changes !== 1) return;
-  await emitRound(handler, gameId, finishedRound + 1);
-}
-
-type AvailabilityOutcome =
-  | { kind: "ready"; excluded: Set<string> }
-  | { kind: "waiting" }
-  /** The window closed the game (deleted/unreachable player): publish nothing. */
-  | { kind: "aborted" };
-
-function dropAnnouncedRound(db: Db, gameId: string, round: number): void {
-  db.prepare("DELETE FROM rounds WHERE game_id = ? AND number = ? AND status = 'announced'").run(
-    gameId,
-    round,
-  );
+  const committed = db.transaction(() => {
+    if (!isLiveRound(db, gameId, round)) return false;
+    db.prepare(
+      `INSERT OR REPLACE INTO rounds
+        (game_id, number, status, winner_account_id, option_map_json, resolution_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(gameId, round, r.status, r.winner, JSON.stringify(r.meta), JSON.stringify(r.input));
+    for (const [accountId, points] of r.awards) {
+      db.prepare("UPDATE players SET points = points + ? WHERE game_id = ? AND account_id = ?").run(
+        points, gameId, accountId,
+      );
+    }
+    db.prepare("UPDATE games SET pot = ? WHERE id = ?").run(r.pot, gameId);
+    return true;
+  })();
+  if (!committed) return;
+  if (!await postRoundResult(handler, gameId, round, r.input)) return;
+  await advanceAfterRound(handler, gameId, round);
 }
 
 export async function postRoundResult(
@@ -290,28 +260,43 @@ export async function postRoundResult(
   return true;
 }
 
+/** Post a persisted-but-unposted round result. False when the game went terminal first. */
 export async function recoverRoundResult(
   handler: HandlerDeps,
   gameId: string,
   round: number,
 ): Promise<boolean> {
   const row = loadRound(handler.db, gameId, round);
-  if (!row || row.resolution_posted_at || !["resolved", "auto_tied", "walkover"].includes(row.status)) {
-    return true;
-  }
+  if (!row || row.resolution_posted_at || !RESOLVED_ROUND_STATUSES.includes(row.status)) return true;
   const game = loadGame(handler.db, gameId);
   if (!game || isTerminal(game.status)) return false;
-  if (!row.resolution_json) return true;
-  let input: TallyInput;
+  let input: unknown;
   try {
-    const parsed: unknown = JSON.parse(row.resolution_json);
-    if (!parsed || typeof parsed !== "object") return true;
-    input = parsed as TallyInput;
+    input = JSON.parse(row.resolution_json ?? "null");
   } catch {
     return true;
   }
-  return postRoundResult(handler, gameId, round, input);
+  if (!input || typeof input !== "object") return true;
+  return postRoundResult(handler, gameId, round, input as TallyInput);
 }
+
+/** recoverRoundResult for rounds 1..throughRound, stopping at the first failure. */
+export async function recoverRoundResults(
+  handler: HandlerDeps,
+  gameId: string,
+  throughRound: number,
+): Promise<boolean> {
+  for (let round = 1; round <= throughRound; round += 1) {
+    if (!await recoverRoundResult(handler, gameId, round)) return false;
+  }
+  return true;
+}
+
+type AvailabilityOutcome =
+  | { kind: "ready"; excluded: Set<string> }
+  | { kind: "waiting" }
+  /** The window closed the game (deleted/unreachable player): publish nothing. */
+  | { kind: "aborted" };
 
 /**
  * v1.1 1.4: ensure every eligible player's tune for this round is available.
@@ -323,197 +308,106 @@ export async function recoverRoundResult(
  *   early (ready).
  * - At/after deadline → re-check; still-dead players are excluded (round forfeit).
  */
-function isUnreachableAccountError(err: unknown): boolean {
-  return err instanceof MastodonApiError && [403, 404, 410].includes(err.status);
-}
-
 async function ensureAvailability(
   handler: HandlerDeps,
   gameId: string,
   round: number,
   eligibleIds: string[],
-  allTunes: { accountId: string; position: number; videoId: string; title: string }[],
 ): Promise<AvailabilityOutcome> {
   const db = handler.db;
-  const empty = new Set<string>();
-
-  const tuneOf = (accountId: string) =>
-    allTunes.find((t) => t.accountId === accountId && t.position === round);
-
-  const checkAll = async (ids: string[]): Promise<string[]> => {
+  const tunes = new Map<string, Tune>();
+  for (const t of loadTunes(db, gameId)) if (t.position === round) tunes.set(t.accountId, t);
+  const deadIds = async (): Promise<string[]> => {
     const dead: string[] = [];
-    for (const id of ids) {
-      const tune = tuneOf(id);
-      if (!tune) continue;
-      const ok = await handler.checkAvailable(tune.videoId);
-      if (!ok) dead.push(id);
+    for (const id of eligibleIds) {
+      const tune = tunes.get(id);
+      if (tune && !(await handler.checkAvailable(tune.videoId))) dead.push(id);
     }
     return dead;
   };
+  const publish = (excluded = new Set<string>()): AvailabilityOutcome => {
+    db.prepare("DELETE FROM rounds WHERE game_id = ? AND number = ? AND status = 'announced'").run(gameId, round);
+    return { kind: "ready", excluded };
+  };
+
+  const dead = await deadIds();
+  // All healthy (replacement arrived or false alarm) → publish now.
+  if (dead.length === 0) return publish();
 
   const existing = loadRound(db, gameId, round);
+  const windowExists = existing?.status === "announced";
   const now = handler.now();
-  const graceMs = handler.replacementGraceMin * 60 * 1000;
+  let deadline: string;
+  let notified: Set<string>;
+  let prompts: Record<string, string>;
+  if (windowExists) {
+    const meta = roundMeta(existing).replacement ?? {};
+    // Window closed — exclude still-dead players (round forfeit only).
+    if (!meta.deadline || now.getTime() >= new Date(meta.deadline).getTime()) return publish(new Set(dead));
+    deadline = meta.deadline;
+    notified = new Set(meta.notified ?? []);
+    prompts = { ...(meta.prompts ?? {}) };
+  } else {
+    deadline = new Date(now.getTime() + handler.replacementGraceMin * 60_000).toISOString();
+    notified = new Set();
+    prompts = {};
+  }
 
-  if (!existing || existing.status !== "announced") {
-    const dead = await checkAll(eligibleIds);
-    if (dead.length === 0) return { kind: "ready", excluded: empty };
-
-    const deadline = new Date(now.getTime() + graceMs).toISOString();
-    const notified: string[] = [];
-    const prompts: Record<string, string> = {};
-    for (const accountId of dead) {
-      const tune = tuneOf(accountId);
-      if (!tune) continue;
-      try {
-        const promptId = await dm(
-          db,
-          handler.client,
-          accountId,
-          m().replaceTuneDm(tune.position, round, tune.title, deadline),
-          undefined,
-          {},
-          handler.instanceDomain,
-        );
-        notified.push(accountId);
-        prompts[accountId] = promptId;
-      } catch (err) {
-        if (isUnreachableAccountError(err)) {
-          await handlePlayerDeleted(handler, accountId);
-          return { kind: "aborted" };
-        }
-        handler.log?.("replacement DM failed; retrying later", {
-          accountId,
-          round,
-          err: err instanceof Error ? err.message : String(err),
-        });
+  for (const accountId of dead) {
+    const tune = tunes.get(accountId)!;
+    if (notified.has(accountId)) continue;
+    try {
+      prompts[accountId] = await dm(
+        handler,
+        accountId,
+        m().replaceTuneDm(tune.position, round, tune.title, deadline),
+      );
+      notified.add(accountId);
+    } catch (err) {
+      if (err instanceof MastodonApiError && [403, 404, 410].includes(err.status)) {
+        await handlePlayerDeleted(handler, accountId);
+        return { kind: "aborted" };
       }
+      handler.logger?.warn(
+        { accountId, round, err: err instanceof Error ? err.message : String(err) },
+        "replacement DM failed; retrying later",
+      );
     }
-    const liveGame = loadGame(db, gameId);
-    if (!liveGame || liveGame.status !== "ROUND" || liveGame.currentRound !== round) {
-      return { kind: "aborted" };
-    }
+  }
+
+  const replacement = JSON.stringify({ replacement: { deadline, notified: [...notified], prompts } });
+  if (!windowExists) {
+    if (!isLiveRound(db, gameId, round)) return { kind: "aborted" };
     db.prepare(
       `INSERT OR REPLACE INTO rounds (game_id, number, status, option_map_json)
        VALUES (?, ?, 'announced', ?)`,
-    ).run(gameId, round, JSON.stringify({ replacement: { deadline, notified, prompts } }));
+    ).run(gameId, round, replacement);
     return { kind: "waiting" };
   }
-
-  // Announced row exists — evaluate the window.
-  const meta: RoundMeta["replacement"] = roundMeta(existing).replacement ?? {}
-  const deadlineMs = meta.deadline ? new Date(meta.deadline).getTime() : now.getTime();
-  const notified = new Set(meta.notified ?? []);
-  const prompts: Record<string, string> = { ...(meta.prompts ?? {}) };
-  const windowOpen = now.getTime() < deadlineMs;
-
-  const dead = await checkAll(eligibleIds);
-  if (dead.length === 0) {
-    // All healthy (replacement arrived or false alarm) → publish now.
-    db.prepare("DELETE FROM rounds WHERE game_id = ? AND number = ? AND status = 'announced'").run(
-      gameId, round,
-    );
-    return { kind: "ready", excluded: empty };
-  }
-
-  if (windowOpen) {
-    const delivered = new Set(notified);
-    for (const accountId of dead) {
-      if (notified.has(accountId)) continue;
-      const tune = tuneOf(accountId);
-      if (!tune) continue;
-      try {
-        const promptId = await dm(
-          db,
-          handler.client,
-          accountId,
-          m().replaceTuneDm(
-            tune.position,
-            round,
-            tune.title,
-            meta.deadline ?? new Date(deadlineMs).toISOString(),
-          ),
-          undefined,
-          {},
-          handler.instanceDomain,
-        );
-        delivered.add(accountId);
-        prompts[accountId] = promptId;
-      } catch (err) {
-        if (isUnreachableAccountError(err)) {
-          await handlePlayerDeleted(handler, accountId);
-          return { kind: "aborted" };
-        }
-        handler.log?.("replacement DM retry failed", {
-          accountId,
-          round,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    const mergedNotified = [...delivered];
-    db.prepare(
-      `UPDATE rounds SET option_map_json = ? WHERE game_id = ? AND number = ? AND status = 'announced'`,
-    ).run(
-      JSON.stringify({
-        replacement: { deadline: meta.deadline, notified: mergedNotified, prompts },
-      }),
-      gameId,
-      round,
-    );
-
-    // If everything is healthy now (replacements arrived), fall through to publish.
-    const stillDead = await checkAll(eligibleIds);
-    if (stillDead.length === 0) {
-      db.prepare("DELETE FROM rounds WHERE game_id = ? AND number = ? AND status = 'announced'").run(
-        gameId, round,
-      );
-      return { kind: "ready", excluded: empty };
-    }
-    return { kind: "waiting" };
-  }
-
-  // Window closed — exclude still-dead players (round forfeit only).
-  const excluded = new Set(dead);
-  db.prepare("DELETE FROM rounds WHERE game_id = ? AND number = ? AND status = 'announced'").run(
-    gameId, round,
-  );
-  return { kind: "ready", excluded };
+  db.prepare(
+    `UPDATE rounds SET option_map_json = ? WHERE game_id = ? AND number = ? AND status = 'announced'`,
+  ).run(replacement, gameId, round);
+  // If everything is healthy now (replacements arrived), publish.
+  return (await deadIds()).length === 0 ? publish() : { kind: "waiting" };
 }
 
 /** Load round winners and post the finale thread, then close the game (PRD §5.7). */
 export async function emitFinale(handler: HandlerDeps, gameId: string): Promise<void> {
-  if (emittingFinales.has(gameId)) return;
-  emittingFinales.add(gameId);
-  try {
-    await emitFinaleInner(handler, gameId);
-  } finally {
-    emittingFinales.delete(gameId);
-  }
+  await exclusively(`finale:${gameId}`, () => emitFinaleInner(handler, gameId));
 }
 
 async function emitFinaleInner(handler: HandlerDeps, gameId: string): Promise<void> {
   const db = handler.db;
   const game = loadGame(db, gameId);
   if (!game || game.status !== "FINALE") return;
-  for (let round = 1; round <= game.playlistLength; round += 1) {
-    const row = loadRound(db, gameId, round);
-    if (row && ["resolved", "auto_tied", "walkover"].includes(row.status)) {
-      if (!await recoverRoundResult(handler, gameId, round)) return;
-    }
-  }
+  if (!await recoverRoundResults(handler, gameId, game.playlistLength)) return;
   const players = loadPlayers(db, gameId);
   const tunes = loadTunes(db, gameId);
 
-  const roundRows = loadRoundWinners(db, gameId);
-  const winningTunes = roundRows
-    .map((r) => {
-      const t = tunes.find((x) => x.accountId === r.winner_account_id && x.position === r.number);
-      return t
-        ? { round: r.number, accountId: r.winner_account_id, videoId: t.videoId, title: t.title, canonicalUrl: t.canonicalUrl }
-        : null;
-    })
-    .filter((x): x is NonNullable<typeof x> => x !== null);
+  const winningTunes = loadRoundWinners(db, gameId).flatMap((r) => {
+    const t = tunes.find((x) => x.accountId === r.winner_account_id && x.position === r.number);
+    return t ? [{ ...t, round: r.number }] : [];
+  });
 
   const participated = new Set<string>();
   for (let round = 1; round <= game.playlistLength; round += 1) {
@@ -537,7 +431,6 @@ async function emitFinaleInner(handler: HandlerDeps, gameId: string): Promise<vo
   const duelers = players.filter(
     (p) => p.inviteStatus === "accepted" && (participated.size === 0 || participated.has(p.accountId)),
   );
-  const { champions } = computeStandings(duelers);
 
   // v1.1 1.3: final-round tie splits the pot (persisted as finalSplit meta).
   const finalRound = loadRound(db, gameId, game.playlistLength);
@@ -578,14 +471,11 @@ async function emitFinaleInner(handler: HandlerDeps, gameId: string): Promise<vo
     }
   }
 
-  await postFinale(handler.client, game, duelers, champions, winningTunes, {
+  await postFinale(handler.client, game, duelers, champions(duelers), winningTunes, {
     duelThreadId: game.threadRootId,
     potSplit,
     queueUrl,
   });
 
-  db.prepare("UPDATE games SET status = 'CLOSED', updated_at = ? WHERE id = ? AND status = 'FINALE'").run(
-    handler.now().toISOString(),
-    gameId,
-  );
+  setGameStatus(db, gameId, "FINALE", "CLOSED", handler.now());
 }

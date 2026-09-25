@@ -15,10 +15,10 @@
  *   app/models/poll.rb                           show_totals_now?, voted?, own_votes
  */
 
-export const MIN_EXPIRATION_SEC = 300; // MIN_EXPIRATION = 5.minutes
-export const MAX_EXPIRATION_SEC = 2_592_000; // MAX_EXPIRATION = 1.month
-export const MAX_OPTIONS = 4; // PollOptionsValidator::MAX_OPTIONS
-export const MAX_OPTION_CHARS = 50; // PollOptionsValidator::MAX_OPTION_CHARS
+const MIN_EXPIRATION_SEC = 300; // MIN_EXPIRATION = 5.minutes
+const MAX_EXPIRATION_SEC = 2_592_000; // MAX_EXPIRATION = 1.month
+const MAX_OPTIONS = 4; // PollOptionsValidator::MAX_OPTIONS
+const MAX_OPTION_CHARS = 50; // PollOptionsValidator::MAX_OPTION_CHARS
 
 export type Json = Record<string, unknown>;
 
@@ -51,7 +51,7 @@ export type MockStatus = {
   visibility: string;
 };
 
-export type MockNotification = {
+type MockNotification = {
   id: string;
   type: string;
   /** The account that CAUSED the notification (NotificationSerializer#account). */
@@ -69,7 +69,7 @@ export type SeedNotification = {
   statusId?: string;
 };
 
-export function splitAcct(acct: string): { username: string; domain: string | null } {
+function splitAcct(acct: string): { username: string; domain: string | null } {
   const at = acct.lastIndexOf("@");
   if (at < 0) return { username: acct, domain: null };
   return { username: acct.slice(0, at), domain: acct.slice(at + 1) };
@@ -309,12 +309,7 @@ export class MockState {
     if (!poll) return null;
     const expired = this.pollExpired(poll);
     const showTotals = expired || !poll.hideTotals;
-    const tallies = new Array<number>(poll.options.length).fill(0);
-    for (const choices of poll.votes.values()) {
-      for (const choice of choices) {
-        if (typeof tallies[choice] === "number") tallies[choice] += 1;
-      }
-    }
+    const tallies = this.tally(poll);
     const body: Record<string, unknown> = {
       id: poll.id,
       expires_at: new Date(poll.expiresAt * 1000).toISOString(),
@@ -341,6 +336,17 @@ export class MockState {
     return body;
   }
 
+  /** Votes per option, as Poll#cached_tallies counts them. */
+  tally(poll: MockPoll): number[] {
+    const tallies = new Array<number>(poll.options.length).fill(0);
+    for (const choices of poll.votes.values()) {
+      for (const choice of choices) {
+        if (typeof tallies[choice] === "number") tallies[choice] += 1;
+      }
+    }
+    return tallies;
+  }
+
   /**
    * REST::ConversationSerializer: id, unread, accounts, last_status.
    *
@@ -348,13 +354,10 @@ export class MockState {
    * a direct message stays "direct" here because the bot's DM check keys off
    * the conversation, not the visibility string. Conversations are derived
    * from direct statuses, addressed accounts included as participants.
-   */
-  /**
-   * Conversations, newest thread first.
    *
-   * since_id follows conversations_spec: a since_id older than every
-   * conversation returns all of them, and one in the future returns none.
-   * The comparison is against the thread's newest status id.
+   * Newest thread first. since_id follows conversations_spec: a since_id
+   * older than every conversation returns all of them, and one in the future
+   * returns none. The comparison is against the thread's newest status id.
    */
   conversations(viewer: MockAccount | null, sinceId?: string | null): Json[] {
     return this.conversationList(viewer, sinceId, Number.POSITIVE_INFINITY);
