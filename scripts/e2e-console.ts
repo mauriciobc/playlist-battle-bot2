@@ -145,6 +145,13 @@ function wipe(db: Db): void {
 export class Harness {
   readonly db: Db;
   readonly checks: Check[] = [];
+  /**
+   * Mastodon requests this scenario issued, by kind. The bot's production cost
+   * is the upstream calls it makes — they are rate-limited, they cost latency,
+   * and unlike CPU time they can be counted exactly. `status`/`direct` are what
+   * players actually receive; the rest is polling, tallying and cleanup.
+   */
+  readonly requests = { notifications: 0, tally: 0, status: 0, direct: 0, delete: 0 };
   gameId: string | null = null;
 
   /** False when the harness borrowed a connection and must not close it. */
@@ -191,8 +198,12 @@ export class Harness {
     else wipe(this.db);
 
     const get = async (path: string) => {
-      if (path.startsWith("/api/v1/notifications")) return this.queue.splice(0);
+      if (path.startsWith("/api/v1/notifications")) {
+        this.requests.notifications += 1;
+        return this.queue.splice(0);
+      }
       if (path.startsWith("/api/v1/polls/")) {
+        this.requests.tally += 1;
         const pollId = path.slice("/api/v1/polls/".length);
         const record = this.polls.find((p) => p.pollId === pollId);
         if (!record) throw new Error(`console client: unknown poll ${pollId}`);
@@ -213,6 +224,8 @@ export class Harness {
       post: async (path: string, body?: unknown) => {
         if (path !== "/api/v1/statuses") throw new Error(`console client: unexpected POST ${path}`);
         const payload = (body ?? {}) as Record<string, unknown>;
+        if (payload.visibility === "direct") this.requests.direct += 1;
+        else this.requests.status += 1;
         const n = (this.postSeq += 1);
         const id = `s-${n}`;
         const poll = payload.poll as { options: string[]; expires_in: number } | undefined;
@@ -227,6 +240,7 @@ export class Harness {
       delete: async (path: string) => {
         const prefix = "/api/v1/statuses/";
         if (!path.startsWith(prefix)) throw new Error(`console client: unexpected DELETE ${path}`);
+        this.requests.delete += 1;
         const statusId = path.slice(prefix.length);
         const pollIndex = this.polls.findIndex((p) => p.statusId === statusId);
         const poll = pollIndex >= 0 ? this.polls.splice(pollIndex, 1)[0] : undefined;

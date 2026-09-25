@@ -49,6 +49,13 @@ const RANDOM_SEEDS = [7, 42, 2024, 99, 1234, 31337];
  * cannot buy speed: the run fails when it changes.
  */
 const EXPECTED_CHECKS = 797;
+/**
+ * Statuses and DMs players receive. Pinned: cutting upstream calls by sending
+ * less is not an optimisation. The request *total* is not pinned — it may fall —
+ * but it must be identical in every repeat of a run (checked below), because the
+ * workload is deterministic.
+ */
+const EXPECTED_DELIVERED = { status: 1188, direct: 903 };
 
 type Pass = { label: string; random: boolean; seed: number };
 
@@ -57,7 +64,27 @@ const PASSES: Pass[] = [
   ...RANDOM_SEEDS.map((seed) => ({ label: `random-${seed}`, random: true, seed })),
 ];
 
-type PassResult = { label: string; ms: number; cpuMs: number; checks: number; failed: number; errors: string[] };
+type Requests = Harness["requests"];
+
+type PassResult = {
+  label: string;
+  ms: number;
+  cpuMs: number;
+  checks: number;
+  failed: number;
+  errors: string[];
+  requests: Requests;
+};
+
+function zeroRequests(): Requests {
+  return { notifications: 0, tally: 0, status: 0, direct: 0, delete: 0 };
+}
+
+function totalRequests(requests: Requests): number {
+  return (
+    requests.notifications + requests.tally + requests.status + requests.direct + requests.delete
+  );
+}
 type RepeatResult = PassResult & { passes: PassResult[] };
 
 /** Microseconds of process CPU (user + system) consumed by one synchronously-awaited call. */
@@ -93,6 +120,7 @@ async function runScenario(connection: Db, pass: Pass, scenario: Scenario): Prom
     checks: h.checks.length,
     failed: failed.length,
     errors: [...errors, ...failedDetails],
+    requests: { ...h.requests },
   };
   h.close();
   return result;
@@ -108,6 +136,7 @@ async function runPass(connection: Db, pass: Pass): Promise<PassResult> {
     checks: sum(results, (r) => r.checks),
     failed: sum(results, (r) => r.failed),
     errors: results.flatMap((r) => r.errors),
+    requests: sumRequests(results.map((r) => r.requests)),
   };
 }
 
@@ -121,8 +150,21 @@ async function runRepeat(connection: Db): Promise<RepeatResult> {
     checks: sum(passes, (p) => p.checks),
     failed: sum(passes, (p) => p.failed),
     errors: passes.flatMap((p) => p.errors),
+    requests: sumRequests(passes.map((p) => p.requests)),
     passes,
   };
+}
+
+function sumRequests(items: Requests[]): Requests {
+  const total = zeroRequests();
+  for (const item of items) {
+    total.notifications += item.notifications;
+    total.tally += item.tally;
+    total.status += item.status;
+    total.direct += item.direct;
+    total.delete += item.delete;
+  }
+  return total;
 }
 
 function sum<T>(items: T[], pick: (item: T) => number): number {
@@ -174,6 +216,11 @@ async function bench(): Promise<number> {
   const all = [...warmup, ...timed];
   const errors = all.flatMap((r) => r.errors);
   const drift = all.filter((r) => r.checks !== EXPECTED_CHECKS);
+  const expectedRequests = all[0] === undefined ? 0 : totalRequests(all[0].requests);
+  const requestDrift = all.filter((r) => totalRequests(r.requests) !== expectedRequests);
+  const delivered = all.filter(
+    (r) => r.requests.status !== EXPECTED_DELIVERED.status || r.requests.direct !== EXPECTED_DELIVERED.direct,
+  );
   const failures = sum(all, (r) => r.failed);
   const cpu = timed.map((r) => r.cpuMs);
   const wall = timed.map((r) => r.ms);
@@ -190,6 +237,15 @@ async function bench(): Promise<number> {
   }
   console.log(`  cpu_ms spread  ${spread(cpu)}`);
   console.log(`  sim_ms spread  ${spread(wall)}`);
+
+  const requests = timed[0]?.requests ?? zeroRequests();
+  console.log(`METRIC api_calls=${totalRequests(requests)}`);
+  console.log(`METRIC api_calls_per_game=${(totalRequests(requests) / games).toFixed(4)}`);
+  console.log(`METRIC api_calls_notifications=${requests.notifications}`);
+  console.log(`METRIC api_calls_tally=${requests.tally}`);
+  console.log(`METRIC api_calls_status=${requests.status}`);
+  console.log(`METRIC api_calls_direct=${requests.direct}`);
+  console.log(`METRIC api_calls_delete=${requests.delete}`);
 
   console.log(`METRIC sim_ms=${simMs.toFixed(3)}`);
   console.log(`METRIC sim_ms_median=${median(wall).toFixed(3)}`);
@@ -220,7 +276,22 @@ async function bench(): Promise<number> {
         `${drift.map((r) => r.checks).join(", ")} (assertions must not be weakened)`,
     );
   }
-  if (failures > 0 || errors.length > 0 || drift.length > 0) return 1;
+  if (requestDrift.length > 0) {
+    console.error(
+      `bench: workload not deterministic — repeats issued ${requestDrift.map((r) => totalRequests(r.requests)).join(", ")} ` +
+        `Mastodon requests where the first issued ${expectedRequests}`,
+    );
+  }
+  if (delivered.length > 0) {
+    console.error(
+      `bench: delivered content changed — statuses/DMs must stay ${EXPECTED_DELIVERED.status}/${EXPECTED_DELIVERED.direct}, saw ` +
+        `${delivered.map((r) => `${r.requests.status}/${r.requests.direct}`).join(", ")} ` +
+        "(fewer upstream calls must not mean fewer messages)",
+    );
+  }
+  if (failures > 0 || errors.length > 0 || drift.length > 0 || requestDrift.length > 0 || delivered.length > 0) {
+    return 1;
+  }
   return 0;
 }
 
