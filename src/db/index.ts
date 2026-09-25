@@ -160,6 +160,32 @@ const MIGRATIONS: { version: number; sql: string }[] = [
   },
 ];
 
+/**
+ * SQLite compiles a statement on every `prepare` call, and the store,
+ * scheduler and handlers prepare the same handful of statements thousands of
+ * times while a game runs — it was 39% of the replayed workload. Memoize the
+ * compiled statement on the connection so every caller keeps writing
+ * `db.prepare(sql)` and pays the compile once.
+ *
+ * Statements are bound to the connection they came from, which is why the
+ * cache lives on the instance: a `Db` from `openDatabase` may be closed and
+ * collected freely, and the cached statements go with it.
+ */
+function memoizeStatements(db: Db): void {
+  const compiled = new Map<string, Database.Statement>();
+  const compile = db.prepare.bind(db);
+  // The original `prepare` is generic over the bind parameters; the cache is
+  // keyed by SQL text alone, so callers keep their own parameter types.
+  db.prepare = ((sql: string) => {
+    let statement = compiled.get(sql);
+    if (statement === undefined) {
+      statement = compile(sql);
+      compiled.set(sql, statement);
+    }
+    return statement;
+  }) as Db["prepare"];
+}
+
 export function openDatabase(path: string): Db {
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
@@ -167,6 +193,7 @@ export function openDatabase(path: string): Db {
   const db = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  memoizeStatements(db);
   return db;
 }
 
