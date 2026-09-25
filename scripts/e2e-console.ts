@@ -10,6 +10,8 @@
  * Exits non-zero if any check fails.
  */
 
+import { pathToFileURL } from "node:url";
+
 import { openDatabase, migrate, type Db } from "../src/db/index.js";
 import { type HandlerDeps } from "../src/handlers/mention.js";
 import { handlePlayerDeleted } from "../src/handlers/closure.js";
@@ -26,7 +28,7 @@ import type { Game, Player } from "../src/game/types.js";
 import type { MastodonClient } from "../src/mastodon/client.js";
 import type { RawNotification } from "../src/mastodon/notifications.js";
 import { m, setLocale } from "../src/i18n/index.js";
-import { createBattlePlaylistPublisher } from "../src/youtube/playlist.js";
+import { createBattlePlaylistPublisher, type BattlePlaylistLink } from "../src/youtube/playlist.js";
 
 // ── constants ───────────────────────────────────────────────
 
@@ -41,6 +43,20 @@ const CLOCK_BASE = "2026-01-01T00:00:00.000Z";
 const PLAYLIST_LENGTH = 8;
 /** Independent of src's ROUND_QUORUM so the ledger stays a real cross-check. */
 const QUORUM = 3;
+
+/**
+ * YouTube's `watch_videos` queue endpoint without the network: the harness must
+ * not depend on youtube.com being reachable (or on how fast it answers), so the
+ * endpoint answers like the real 303 redirect with a fixed list token.
+ */
+const queueFetch: typeof fetch = async (input) => {
+  const ids = new URL(String(input)).searchParams.get("video_ids")?.split(",") ?? [];
+  const first = ids[0] ?? "";
+  return new Response(null, {
+    status: 303,
+    headers: { location: `https://www.youtube.com/watch?v=${first}&list=TLGGconsole0000000` },
+  });
+};
 
 // ── CLI ─────────────────────────────────────────────────────
 
@@ -100,7 +116,7 @@ function videoIds(acct: string): string[] {
 
 // ── harness ─────────────────────────────────────────────────
 
-class Harness {
+export class Harness {
   readonly db: Db;
   readonly checks: Check[] = [];
   gameId: string | null = null;
@@ -119,6 +135,8 @@ class Harness {
     winners: 0,
   };
   private readonly rng: () => number;
+  /** What the finale's playlist publisher returned, so the checks can assert on it. */
+  private playlistLink: BattlePlaylistLink | null = null;
   private clock = new Date(CLOCK_BASE);
   private notifSeq = 0;
   private postSeq = 0;
@@ -181,6 +199,7 @@ class Harness {
       },
     };
 
+    const publishBattlePlaylist = createBattlePlaylistPublisher({ fetchImpl: queueFetch });
     this.deps = {
       db: this.db,
       client: client as unknown as MastodonClient,
@@ -200,7 +219,12 @@ class Harness {
       }),
       checkAvailable: async (videoId) => !this.deadVideos.has(videoId),
       // Anonymous queue links only: the console harness never touches an account.
-      publishBattlePlaylist: createBattlePlaylistPublisher(),
+      // The link is recorded so the finale checks can assert on the replies.
+      publishBattlePlaylist: async (input) => {
+        const link = await publishBattlePlaylist(input);
+        this.playlistLink = link;
+        return link;
+      },
       replacementGraceMin: REPLACEMENT_GRACE_MIN,
       now: () => this.clock,
       newGameId: () => "g-1",
@@ -591,12 +615,20 @@ class Harness {
     for (const p of all.filter((p) => p.inviteStatus !== "accepted")) {
       this.check(`finale never crowns withdrawn @${p.acct}`, !text.includes(`@${p.acct}`), flat);
     }
-    const replies = this.posts.filter((p) => p.body.in_reply_to_id === summary.id).length;
+    // The finale replies with the battle link first (only when publishing
+    // worked), then one reply per winning round.
+    const link = this.playlistLink;
+    const replies = this.posts.filter((p) => p.body.in_reply_to_id === summary.id);
+    const expectedReplies = this.ledger.winners + (link ? 1 : 0);
     this.check(
       "finale tune replies match ledger winners",
-      replies === this.ledger.winners,
-      `${replies} replies vs ${this.ledger.winners} winning rounds`,
+      replies.length === expectedReplies,
+      `${replies.length} replies vs ${expectedReplies} expected for ${this.ledger.winners} winning rounds`,
     );
+    if (link) {
+      const queueReply = replies.find((p) => String(p.body.status ?? "").includes(link.url));
+      this.check("finale queue reply carries the published link", Boolean(queueReply), link.url);
+    }
     const split = this.ledger.finalSplit;
     if (split) {
       this.check(
@@ -647,7 +679,7 @@ class Harness {
 
 // ── scenarios ───────────────────────────────────────────────
 
-type Scenario = {
+export type Scenario = {
   label: string;
   title: string;
   votes: Votes;
@@ -657,7 +689,7 @@ type Scenario = {
 
 const ALL_RESOLVED = Array.from({ length: PLAYLIST_LENGTH }, () => "resolved");
 
-const SCENARIOS: Scenario[] = [
+export const SCENARIOS: Scenario[] = [
   {
     label: "A",
     title: "SCENARIO A — 2 players · 8 rounds · wins, ties, pot carry, split final pot",
@@ -858,7 +890,12 @@ async function main(): Promise<void> {
   if (failed > 0) process.exitCode = 1;
 }
 
-main().catch((err: unknown) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+/** Only run when invoked as the CLI; the benchmark imports Harness/SCENARIOS. */
+const invokedAsCli = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedAsCli) {
+  main().catch((err: unknown) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

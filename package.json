@@ -14,6 +14,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench:sim": "tsx scripts/bench-sim.ts",
     "e2e:console": "tsx scripts/e2e-console.ts"
   },
   "dependencies": {

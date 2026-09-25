@@ -28,7 +28,7 @@ type BattlePlaylistInput = {
   existingPlaylistId: string | null;
 };
 
-type BattlePlaylistLink = {
+export type BattlePlaylistLink = {
   url: string;
   /** Set for an account playlist, null for an anonymous queue link. */
   playlistId: string | null;
