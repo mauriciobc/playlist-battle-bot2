@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "../src/db/index.js";
 import { checkAvailable } from "../src/youtube/oembed.js";
-import { handleDm, type HandlerDeps } from "../src/handlers/mention.js";
-import { checkDeadlines } from "../src/scheduler/index.js";
+import type { HandlerDeps } from "../src/handlers/deps.js";
+import { handleDm } from "../src/handlers/directMessage.js";
+import { voidOpenGame } from "../src/handlers/closure.js";
+import { pollsNeedingCleanup } from "../src/db/rounds.js";
+import { checkDeadlines, checkPolls } from "../src/scheduler/index.js";
 import { emitFinale, emitRound } from "../src/scheduler/roundState.js";
 import { m } from "../src/i18n/index.js";
 import { MastodonApiError } from "../src/mastodon/client.js";
@@ -219,6 +222,29 @@ describe("availability window (v1.1 1.4)", () => {
     expect(roundRow(h.db, second, 1)!.status).toBe("announced");
   });
 
+  it("a reply to some other status reaches the only open window", async () => {
+    const gameId = seedRoundGame(h.db, "id-alice");
+    await emitRound(h.deps, gameId, 1);
+
+    const result = await aliceDm(link(videoId("other")), { inReplyToId: "s-unrelated" });
+
+    expect(result).toMatchObject({ handled: true, kind: "tune_replaced" });
+    expect(roundRow(h.db, gameId, 1)!.status).toBe("poll_open");
+  });
+
+  it("with several open windows, a reply to some other status is ambiguous", async () => {
+    const first = seedRoundGame(h.db, "id-alice");
+    const second = seedRoundGame(h.db, "id-alice");
+    await emitRound(h.deps, first, 1);
+    await emitRound(h.deps, second, 1);
+
+    const result = await aliceDm(link(videoId("other")), { inReplyToId: "s-unrelated" });
+
+    expect(result).toMatchObject({ kind: "replace_rejected", detail: "ambiguous replacement window" });
+    expect(roundRow(h.db, first, 1)!.status).toBe("announced");
+    expect(roundRow(h.db, second, 1)!.status).toBe("announced");
+  });
+
   it("deadline with no replacement → round forfeit excludes the player (2 of 3 → 2-option poll)", async () => {
     const gameId = seedRoundGame(h.db, "id-bob", ["host", "alice", "bob"]);
     await emitRound(h.deps, gameId, 1);
@@ -283,6 +309,29 @@ describe("availability window (v1.1 1.4)", () => {
     // nothing may be published onto the void game — no round row, only the closure notice
     expect(roundRow(fd.db, gameId, 1)).toBeUndefined();
     expect(fd.texts()).toEqual([m().sideForfeit("Theme")]);
+  });
+
+  it("cancelling during a replacement window leaves nothing for the cleanup sweep", async () => {
+    const gameId = seedRoundGame(h.db, "id-alice");
+    await emitRound(h.deps, gameId, 1);
+
+    await voidOpenGame(h.deps, gameId, "CANCEL");
+
+    expect(pollsNeedingCleanup(h.db)).toEqual([]);
+    expect(roundRow(h.db, gameId, 1)).toMatchObject({ poll_cleanup_pending: 0 });
+  });
+
+  it("the poll sweep heals a legacy flagged announced round of a void game", async () => {
+    const gameId = seedRoundGame(h.db, "id-alice");
+    await emitRound(h.deps, gameId, 1);
+    h.db.prepare("UPDATE rounds SET poll_cleanup_pending = 1 WHERE game_id = ?").run(gameId);
+    h.db.prepare("UPDATE games SET status = 'CANCELLED' WHERE id = ?").run(gameId);
+
+    await checkPolls(h.sched);
+
+    expect(roundRow(h.db, gameId, 1)).toMatchObject({ status: "resolved", poll_cleanup_pending: 0 });
+    expect(h.deleted).toEqual([]);
+    expect(gameRow(h.db, gameId).status).toBe("CANCELLED");
   });
 });
 

@@ -3,6 +3,14 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { GAME_STATUSES, TERMINAL_STATUSES } from "../game/types.js";
 
+/**
+ * The persistence layer. This directory owns every SQL statement: `index.ts`
+ * opens and migrates the database, and one module per table (games, players,
+ * tunes, rounds, notifications, outbox, heartbeats, videoCache) translates
+ * between rows and domain values. Handlers and the scheduler call those
+ * functions and never write SQL themselves.
+ */
+
 export type Db = Database.Database;
 
 const statusCheck = GAME_STATUSES.map((s) => `'${s}'`).join(", ");
@@ -12,6 +20,11 @@ const statusCheck = GAME_STATUSES.map((s) => `'${s}'`).join(", ");
  * the single source of truth for "game is still open" queries.
  */
 export const NON_TERMINAL_STATUS_SQL = `NOT IN (${TERMINAL_STATUSES.map((s) => `'${s}'`).join(", ")})`;
+
+/** `?, ?, …` — one bind placeholder per value, for an `IN (…)` list. */
+export function placeholders(values: readonly unknown[]): string {
+  return values.map(() => "?").join(", ");
+}
 
 /**
  * Applied in order at startup, each recorded in schema_migrations.
@@ -209,15 +222,14 @@ export function migrate(db: Db): void {
       (r) => r.version,
     ),
   );
-  for (const m of MIGRATIONS) {
-    if (applied.has(m.version)) continue;
-    const run = db.transaction(() => {
-      db.exec(m.sql);
+  for (const migration of MIGRATIONS) {
+    if (applied.has(migration.version)) continue;
+    db.transaction(() => {
+      db.exec(migration.sql);
       db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
-        m.version,
+        migration.version,
         new Date().toISOString(),
       );
-    });
-    run();
+    })();
   }
 }

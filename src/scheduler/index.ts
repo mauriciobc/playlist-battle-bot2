@@ -1,31 +1,55 @@
-import { completeCreation, type HandlerDeps } from "../handlers/mention.js";
-import { removeStatus } from "../handlers/closure.js";
-import { NON_TERMINAL_STATUS_SQL } from "../db/index.js";
-import { isTerminal, type GameStatus } from "../game/types.js";
-import { m } from "../i18n/index.js";
+import type { Db } from "../db/index.js";
 import {
-  markRoundResolved,
-  setGameStatus,
+  collectingGameIdsPastDeadline,
+  gameIdsWithStatus,
+  gamesInRound,
+  interruptedCreations,
   loadGame,
-  loadPlayers,
-  loadRound,
-  loadTunes,
-  RESOLVED_ROUND_STATUSES,
+  loadOpenGame,
   saveGame,
   saveGameState,
-} from "../game/store.js";
+  setGameStatus,
+  unacceptedGameIdsPastDeadline,
+  type InterruptedCreation,
+} from "../db/games.js";
+import { expirePendingInvites, loadPlayers } from "../db/players.js";
+import { loadTunes } from "../db/tunes.js";
+import {
+  RESOLVED_ROUND_STATUSES,
+  announcedRoundsOfOpenGames,
+  clearEarlyClosedPoll,
+  duePolls,
+  isPollOpen,
+  loadRound,
+  markPollCleanedUp,
+  markRoundResolved,
+  openPollByStatus,
+  pollsNeedingCleanup,
+  unexpiredPolls,
+  watchPollVotes,
+  type OpenPoll,
+  type PollCleanup,
+  type WatchedPoll,
+} from "../db/rounds.js";
+import { completeCreation } from "../handlers/publicCommand.js";
+import type { HandlerDeps } from "../handlers/deps.js";
+import { removeStatus } from "../handlers/closure.js";
+import { reply } from "../mastodon/reply.js";
+import { tallyPoll, pollSnapshot, postSideEffect, type PollSnapshot, type TallyInput } from "../mastodon/posts.js";
+import { FIRST_ROUND, isTerminal, type Game, type Tally } from "../game/types.js";
+import { finalizeCollection, startRound, resolveRound } from "../game/engine.js";
+import { errorMessage } from "../errors.js";
+import { addSeconds, MS_PER_SECOND } from "../time.js";
+import { m } from "../i18n/index.js";
+import { claimKey, exclusively, isClaimed } from "./claims.js";
 import {
   advanceAfterRound,
   emitRound,
   emitFinale,
-  exclusively,
-  isClaimed,
   postRoundResult,
   recoverRoundResult,
   recoverRoundResults,
 } from "./roundState.js";
-import { finalizeCollection, startRound, resolveRound } from "../game/engine.js";
-import { tallyPoll, pollSnapshot, postSideEffect, type PollSnapshot, type TallyInput } from "../mastodon/posts.js";
 
 type EarlyCloseConfig = {
   enabled: boolean;
@@ -41,7 +65,10 @@ export type SchedulerDeps = {
   earlyClose?: EarlyCloseConfig;
 };
 
-type Tallies = { accountId: string; votes: number }[];
+/** Stagnation close of a still-open poll: its live tallies, and how to remove its status. */
+type EarlyClose = { tallies: Tally[]; removePoll: () => Promise<boolean> };
+
+type RoundRef = { gameId: string; round: number };
 
 /**
  * Sweep acceptance + submission windows (PRD §5.2, §5.4, §7).
@@ -49,135 +76,68 @@ type Tallies = { accountId: string; votes: number }[];
 export async function checkDeadlines(deps: SchedulerDeps): Promise<void> {
   const { handler } = deps;
   const now = handler.now();
-  const nowIso = now.toISOString();
-  const db = handler.db;
-
-  // 1. Acceptance window: INVITED games past deadline with zero accepts → EXPIRED
-  const expired = db
-    .prepare(
-      `SELECT id FROM games g
-       WHERE status = 'INVITED' AND acceptance_deadline IS NOT NULL AND acceptance_deadline <= ?
-         AND NOT EXISTS (SELECT 1 FROM players p WHERE p.game_id = g.id
-                         AND p.role = 'challenger' AND p.invite_status = 'accepted')`,
-    )
-    .all(nowIso) as { id: string }[];
-  for (const { id } of expired) {
-    setGameStatus(db, id, "INVITED", "EXPIRED", now);
-    const game = loadGame(db, id);
-    if (game) await postSideEffect(handler.client, game, "expired");
-  }
-
-  // 2. Acceptance window closed with some accepts → expire remaining pending challengers
-  const pendingExpiry = db
-    .prepare(
-      `UPDATE players SET invite_status = 'expired'
-       WHERE invite_status = 'pending' AND game_id IN (
-         SELECT id FROM games WHERE status IN ('INVITED','COLLECTING')
-           AND acceptance_deadline IS NOT NULL AND acceptance_deadline <= ?)`,
-    )
-    .run(nowIso).changes;
-
-  // 3. Submission window: COLLECTING past deadline → finalize
-  const collecting = db
-    .prepare(
-      `SELECT id FROM games WHERE status = 'COLLECTING' AND submission_deadline IS NOT NULL AND submission_deadline <= ?`,
-    )
-    .all(nowIso) as { id: string }[];
-  for (const { id } of collecting) {
-    await finalizeCollecting(handler, id);
-  }
-
-  // 4. v1.1 1.4: announced rounds past their replacement deadline → re-enter
-  // emitRound (availability re-check → publish / exclude / walkover).
-  const announced = db
-    .prepare(
-      `SELECT r.game_id, r.number FROM rounds r
-       JOIN games g ON g.id = r.game_id
-       WHERE r.status = 'announced' AND g.status ${NON_TERMINAL_STATUS_SQL}`,
-    )
-    .all() as { game_id: string; number: number }[];
-  for (const row of announced) {
-    await emitRound(handler, row.game_id, row.number);
-  }
+  const expiredGames = await expireUnacceptedGames(handler, now);
+  // Acceptance window closed with some accepts → expire remaining pending challengers.
+  const expiredPendingInvites = expirePendingInvites(handler.db, now);
+  const finalizedGames = await finalizeGamesPastSubmissionDeadline(handler, now);
+  const reemittedRounds = await reemitAnnouncedRounds(handler);
 
   handler.logger?.debug(
-    {
-      expiredGames: expired.length,
-      expiredPendingInvites: pendingExpiry,
-      finalizedGames: collecting.length,
-      reemittedRounds: announced.length,
-    },
+    { expiredGames, expiredPendingInvites, finalizedGames, reemittedRounds },
     "deadline sweep complete",
   );
+}
+
+/** Acceptance window: INVITED games past deadline with zero accepts → EXPIRED. Returns how many. */
+async function expireUnacceptedGames(handler: HandlerDeps, now: Date): Promise<number> {
+  const gameIds = unacceptedGameIdsPastDeadline(handler.db, now);
+  for (const gameId of gameIds) {
+    setGameStatus(handler.db, gameId, "INVITED", "EXPIRED", now);
+    const game = loadGame(handler.db, gameId);
+    if (game) await postSideEffect(handler.client, game, "expired");
+  }
+  return gameIds.length;
+}
+
+/** Submission window: COLLECTING games past deadline → finalize. Returns how many. */
+async function finalizeGamesPastSubmissionDeadline(handler: HandlerDeps, now: Date): Promise<number> {
+  const gameIds = collectingGameIdsPastDeadline(handler.db, now);
+  for (const gameId of gameIds) {
+    await finalizeCollecting(handler, gameId);
+  }
+  return gameIds.length;
+}
+
+/**
+ * v1.1 1.4: announced rounds past their replacement deadline → re-enter
+ * emitRound (availability re-check → publish / exclude / walkover). Returns how many.
+ */
+async function reemitAnnouncedRounds(handler: HandlerDeps): Promise<number> {
+  const rounds = announcedRoundsOfOpenGames(handler.db);
+  for (const { gameId, round } of rounds) {
+    await emitRound(handler, gameId, round);
+  }
+  return rounds.length;
 }
 
 async function finalizeCollecting(handler: HandlerDeps, gameId: string): Promise<void> {
   const db = handler.db;
   const game = loadGame(db, gameId)!;
   const now = handler.now();
-  const result = finalizeCollection(game, loadPlayers(db, gameId), loadTunes(db, gameId), game.playlistLength, now);
+  const result = finalizeCollection(game, loadPlayers(db, gameId), loadTunes(db, gameId), now);
   if (!saveGameState(db, result.game, result.players, "COLLECTING")) return;
 
   if (result.outcome === "fizzled") {
     await postSideEffect(handler.client, result.game, "fizzled");
-    return;
-  }
-  if (result.outcome === "default_win") {
+  } else if (result.outcome === "default_win") {
     const winner = result.players.find((p) => p.accountId === result.defaultWinnerId);
     await postSideEffect(handler.client, result.game, "default_win", winner?.acct);
-    // proceed to finale immediately (posts summary + closes)
-    setGameStatus(db, gameId, "COLLECTING", "FINALE", now);
+    // The game is already in FINALE: post the summary and close it right away.
     await emitFinale(handler, gameId);
-    return;
+  } else {
+    saveGame(db, startRound(result.game, FIRST_ROUND, now));
+    await emitRound(handler, gameId, FIRST_ROUND);
   }
-
-  // ready → start round 1
-  saveGame(db, startRound(result.game, 1, now));
-  await emitRound(handler, gameId, 1);
-}
-
-/**
- * Retry poll deletion for rounds that must stop collecting votes: open polls
- * of terminal games, and polls flagged cleanup-pending. Returns the rounds of
- * still-open games whose poll was cleaned up here.
- */
-async function retryTerminalPollCleanup(handler: HandlerDeps): Promise<{ gameId: string; round: number }[]> {
-  const cleaned: { gameId: string; round: number }[] = [];
-  const rows = handler.db
-    .prepare(
-      `SELECT r.game_id, r.number, r.status AS round_status, r.poll_status_id, g.status AS game_status
-       FROM rounds r JOIN games g ON g.id = r.game_id
-       WHERE r.status = 'poll_open' OR r.poll_cleanup_pending = 1`,
-    )
-    .all() as {
-    game_id: string;
-    number: number;
-    round_status: string;
-    poll_status_id: string | null;
-    game_status: GameStatus;
-  }[];
-
-  for (const row of rows) {
-    if (row.round_status === "poll_open" && !isTerminal(row.game_status)) continue;
-    if (row.round_status === "announced" && !row.poll_status_id) continue;
-    if (
-      row.poll_status_id &&
-      !(await removeStatus(handler, row.poll_status_id, { gameId: row.game_id, round: row.number }))
-    ) {
-      continue;
-    }
-    const updated = handler.db
-      .prepare(
-        `UPDATE rounds SET status = 'resolved', poll_cleanup_pending = 0,
-           poll_status_id = NULL, poll_id = NULL, poll_expires_at = NULL
-         WHERE game_id = ? AND number = ? AND (status = 'poll_open' OR poll_cleanup_pending = 1)`,
-      )
-      .run(row.game_id, row.number);
-    if (updated.changes === 1 && !isTerminal(row.game_status)) {
-      cleaned.push({ gameId: row.game_id, round: row.number });
-    }
-  }
-  return cleaned;
 }
 
 /**
@@ -187,29 +147,15 @@ async function retryTerminalPollCleanup(handler: HandlerDeps): Promise<{ gameId:
  */
 export async function checkPolls(deps: SchedulerDeps): Promise<void> {
   const { handler } = deps;
-  const db = handler.db;
-  const cleanedRounds = await retryTerminalPollCleanup(handler);
-  for (const cleaned of cleanedRounds) {
-    if (!await recoverRoundResult(handler, cleaned.gameId, cleaned.round)) continue;
-    await advanceAfterRound(handler, cleaned.gameId, cleaned.round);
+  const cleanedRounds = await retryPollCleanup(handler);
+  for (const { gameId, round } of cleanedRounds) {
+    if (!await recoverRoundResult(handler, gameId, round)) continue;
+    await advanceAfterRound(handler, gameId, round);
   }
 
-  const due = db
-    .prepare(
-      `SELECT r.game_id, r.number, r.poll_id, r.option_map_json
-       FROM rounds r JOIN games g ON g.id = r.game_id
-       WHERE r.status = 'poll_open' AND r.poll_expires_at IS NOT NULL AND r.poll_expires_at <= ?
-         AND g.status ${NON_TERMINAL_STATUS_SQL}`,
-    )
-    .all(handler.now().toISOString()) as {
-    game_id: string;
-    number: number;
-    poll_id: string;
-    option_map_json: string;
-  }[];
-
-  for (const row of due) {
-    await resolvePollRow(handler, row.game_id, row.number, row.poll_id, row.option_map_json);
+  const due = duePolls(handler.db, handler.now());
+  for (const poll of due) {
+    await resolvePoll(handler, poll);
   }
 
   if (deps.earlyClose?.enabled) {
@@ -227,6 +173,30 @@ export async function checkPolls(deps: SchedulerDeps): Promise<void> {
 }
 
 /**
+ * Retry poll deletion for rounds that must stop collecting votes: open polls
+ * of terminal games, and polls flagged cleanup-pending. Returns the rounds of
+ * still-open games whose poll was cleaned up here.
+ */
+async function retryPollCleanup(handler: HandlerDeps): Promise<RoundRef[]> {
+  const cleaned: RoundRef[] = [];
+  for (const poll of pollsNeedingCleanup(handler.db)) {
+    if (!mustStopCollecting(poll)) continue;
+    const removed = !poll.pollStatusId ||
+      (await removeStatus(handler, poll.pollStatusId, { gameId: poll.gameId, round: poll.round }));
+    if (!removed) continue;
+    const resolvedHere = markPollCleanedUp(handler.db, poll.gameId, poll.round);
+    if (resolvedHere && !isTerminal(poll.gameStatus)) cleaned.push({ gameId: poll.gameId, round: poll.round });
+  }
+  return cleaned;
+}
+
+/** Every row the cleanup query returns must stop collecting, except the live poll of an open game. */
+function mustStopCollecting(poll: PollCleanup): boolean {
+  const isLivePoll = poll.roundStatus === "poll_open" && !isTerminal(poll.gameStatus);
+  return !isLivePoll;
+}
+
+/**
  * Resolve still-open polls whose vote totals stopped changing (Mastodon has no
  * early-close API — we tally live counts, resolve bot-side, then delete the
  * poll status so late votes can't land on a decided round).
@@ -234,87 +204,84 @@ export async function checkPolls(deps: SchedulerDeps): Promise<void> {
  * Guardrails: poll must be older than minAgeSec, votes unchanged for
  * stagnationSec, and tallies must be visible (hide_totals off).
  */
-async function checkStagnantPolls(handler: HandlerDeps, ec: EarlyCloseConfig): Promise<void> {
-  const db = handler.db;
+async function checkStagnantPolls(handler: HandlerDeps, earlyClose: EarlyCloseConfig): Promise<void> {
   const now = handler.now();
+  for (const poll of unexpiredPolls(handler.db, now)) {
+    if (isClaimed(claimKey.poll(poll.gameId, poll.round))) continue;
+    const snapshot = await liveVotes(handler, poll);
+    if (!snapshot) continue;
+    const votesChangedAt = votesLastChangedAt(handler.db, poll, snapshot, now);
+    if (!votesChangedAt || !isStagnant(poll, votesChangedAt, now, earlyClose)) continue;
 
-  const open = db
-    .prepare(
-      `SELECT r.game_id, r.number, r.poll_id, r.poll_status_id, r.option_map_json,
-              r.poll_expires_at, r.watched_votes, r.watched_tally_json, r.votes_changed_at, g.poll_duration_sec
-       FROM rounds r JOIN games g ON g.id = r.game_id
-       WHERE r.status = 'poll_open' AND r.poll_expires_at IS NOT NULL AND r.poll_expires_at > ?
-         AND g.status ${NON_TERMINAL_STATUS_SQL}`,
-    )
-    .all(now.toISOString()) as {
-    game_id: string;
-    number: number;
-    poll_id: string;
-    poll_status_id: string;
-    option_map_json: string;
-    poll_expires_at: string;
-    watched_votes: number | null;
-    watched_tally_json: string | null;
-    votes_changed_at: string | null;
-    poll_duration_sec: number;
-  }[];
-
-  for (const row of open) {
-    if (isClaimed(`poll:${row.game_id}#${row.number}`)) continue;
-
-    let snapshot: PollSnapshot | null;
-    try {
-      snapshot = await pollSnapshot(handler.client, row.poll_id, JSON.parse(row.option_map_json));
-    } catch {
-      continue; // transient API error — natural expiry still resolves this poll
-    }
-    if (!snapshot) continue; // hidden tallies — cannot make a trustworthy early call
-
-    const expiresAt = new Date(row.poll_expires_at);
-    const openedAt = new Date(expiresAt.getTime() - row.poll_duration_sec * 1000);
-    const fingerprint = JSON.stringify(
-      [...snapshot.tallies].sort((a, b) => a.accountId.localeCompare(b.accountId)),
-    );
-    const watch = (changedAt: Date): void => {
-      db.prepare(
-        `UPDATE rounds SET watched_votes = ?, watched_tally_json = ?, votes_changed_at = ?
-         WHERE game_id = ? AND number = ? AND status = 'poll_open' AND poll_id = ?`,
-      ).run(snapshot.totalVotes, fingerprint, changedAt.toISOString(), row.game_id, row.number, row.poll_id);
-    };
-
-    // Legacy rows tracked only the vote total, not the per-option tally.
-    const unchanged = row.watched_tally_json === null
-      ? row.watched_votes === snapshot.totalVotes
-      : row.watched_tally_json === fingerprint;
-    let changedAt = new Date(row.votes_changed_at ?? openedAt.toISOString());
-    if (row.watched_tally_json === null && row.watched_votes === null) {
-      changedAt = snapshot.totalVotes === 0 ? openedAt : now; // first sight
-      watch(changedAt);
-    } else if (!unchanged) {
-      watch(now);
-      continue;
-    } else if (row.watched_tally_json === null) {
-      watch(changedAt); // adopt the fingerprint for a legacy row
-    }
-
-    const ageSec = (now.getTime() - openedAt.getTime()) / 1000;
-    const stillSec = (now.getTime() - changedAt.getTime()) / 1000;
-    if (ageSec < ec.minAgeSec || stillSec < ec.stagnationSec) continue;
-    if (expiresAt.getTime() <= now.getTime()) continue; // due sweep owns it
-
-    await resolvePollRow(handler, row.game_id, row.number, row.poll_id, row.option_map_json, {
+    await resolvePoll(handler, poll, {
       tallies: snapshot.tallies,
-      removePoll: async () => {
-        const context = { gameId: row.game_id, round: row.number };
-        if (!(await removeStatus(handler, row.poll_status_id, context))) return false;
-        db.prepare(
-          `UPDATE rounds SET poll_cleanup_pending = 0, poll_status_id = NULL, poll_id = NULL, poll_expires_at = NULL
-           WHERE game_id = ? AND number = ? AND poll_id = ?`,
-        ).run(row.game_id, row.number, row.poll_id);
-        return true;
-      },
+      removePoll: () => removeEarlyClosedPoll(handler, poll),
     });
   }
+}
+
+/** The poll's live votes; null when tallies are hidden or the API failed. */
+async function liveVotes(handler: HandlerDeps, poll: WatchedPoll): Promise<PollSnapshot | null> {
+  try {
+    return await pollSnapshot(handler.client, poll.pollId, JSON.parse(poll.optionMapJson));
+  } catch {
+    return null; // transient API error — natural expiry still resolves this poll
+  }
+}
+
+/**
+ * Record the votes seen on a watched poll and return when they last changed —
+ * null when they changed since the last look, so the poll is not stagnant.
+ */
+function votesLastChangedAt(db: Db, poll: WatchedPoll, snapshot: PollSnapshot, now: Date): Date | null {
+  const openedAt = pollOpenedAt(poll);
+  const tallyJson = JSON.stringify(
+    [...snapshot.tallies].sort((a, b) => a.accountId.localeCompare(b.accountId)),
+  );
+  const recordSeen = (changedAt: Date): void =>
+    watchPollVotes(db, poll, { totalVotes: snapshot.totalVotes, tallyJson, changedAt });
+
+  const firstSight = poll.watchedTallyJson === null && poll.watchedVotes === null;
+  if (firstSight) {
+    const changedAt = snapshot.totalVotes === 0 ? openedAt : now;
+    recordSeen(changedAt);
+    return changedAt;
+  }
+
+  // Legacy rows tracked only the vote total, not the per-option tally.
+  const isLegacyRow = poll.watchedTallyJson === null;
+  const votesChanged = isLegacyRow
+    ? poll.watchedVotes !== snapshot.totalVotes
+    : poll.watchedTallyJson !== tallyJson;
+  if (votesChanged) {
+    recordSeen(now);
+    return null;
+  }
+  const changedAt = new Date(poll.votesChangedAt ?? openedAt.toISOString());
+  if (isLegacyRow) recordSeen(changedAt); // adopt the fingerprint
+  return changedAt;
+}
+
+function pollOpenedAt(poll: WatchedPoll): Date {
+  return addSeconds(new Date(poll.pollExpiresAt), -poll.pollDurationSec);
+}
+
+/** Old enough, votes still for long enough, and not expired yet (the due sweep owns expired polls). */
+function isStagnant(poll: WatchedPoll, votesChangedAt: Date, now: Date, earlyClose: EarlyCloseConfig): boolean {
+  const ageSec = (now.getTime() - pollOpenedAt(poll).getTime()) / MS_PER_SECOND;
+  const stillSec = (now.getTime() - votesChangedAt.getTime()) / MS_PER_SECOND;
+  const oldEnough = ageSec >= earlyClose.minAgeSec;
+  const votesSettled = stillSec >= earlyClose.stagnationSec;
+  const stillOpen = new Date(poll.pollExpiresAt).getTime() > now.getTime();
+  return oldEnough && votesSettled && stillOpen;
+}
+
+/** Delete the early-closed poll's status, then forget the poll. False when the deletion failed. */
+async function removeEarlyClosedPoll(handler: HandlerDeps, poll: WatchedPoll): Promise<boolean> {
+  const context = { gameId: poll.gameId, round: poll.round };
+  if (!(await removeStatus(handler, poll.pollStatusId, context))) return false;
+  clearEarlyClosedPoll(handler.db, poll);
+  return true;
 }
 
 /** Entry point for `type=poll` notifications (fast path) — resolves immediately if due. */
@@ -324,24 +291,11 @@ export async function checkPollNotification(
 ): Promise<boolean> {
   if (!statusId) return false;
   const { handler } = deps;
-  const row = handler.db
-    .prepare(
-      `SELECT game_id, number, poll_id, option_map_json, poll_expires_at
-       FROM rounds WHERE poll_status_id = ? AND status = 'poll_open'`,
-    )
-    .get(statusId) as
-    | {
-        game_id: string;
-        number: number;
-        poll_id: string;
-        option_map_json: string;
-        poll_expires_at: string | null;
-      }
-    | undefined;
-  if (!row?.poll_expires_at || new Date(row.poll_expires_at).getTime() > handler.now().getTime()) {
-    return false;
-  }
-  await resolvePollRow(handler, row.game_id, row.number, row.poll_id, row.option_map_json);
+  const poll = openPollByStatus(handler.db, statusId);
+  if (!poll?.pollExpiresAt) return false;
+  const stillRunning = new Date(poll.pollExpiresAt).getTime() > handler.now().getTime();
+  if (stillRunning) return false;
+  await resolvePoll(handler, poll);
   return true;
 }
 
@@ -349,74 +303,76 @@ export async function checkPollNotification(
  * Tally and resolve one open poll. `early` (stagnation close) supplies live
  * tallies and removes the still-open poll status before the result posts.
  */
-async function resolvePollRow(
-  handler: HandlerDeps,
-  gameId: string,
-  roundNumber: number,
-  pollId: string,
-  optionMapJson: string,
-  early?: { tallies: Tallies; removePoll: () => Promise<boolean> },
-): Promise<void> {
-  const db = handler.db;
-  const liveGame = () => {
-    const round = db
-      .prepare("SELECT status, poll_id FROM rounds WHERE game_id = ? AND number = ?")
-      .get(gameId, roundNumber) as { status: string; poll_id: string | null } | undefined;
-    const game = loadGame(db, gameId);
-    return round?.status === "poll_open" && round.poll_id === pollId &&
-      game?.status === "ROUND" && game.currentRound === roundNumber
-      ? game
-      : null;
-  };
-
+async function resolvePoll(handler: HandlerDeps, poll: OpenPoll, early?: EarlyClose): Promise<void> {
   // The 60s sweep and the notification fast-path run on independent timers, so
   // both can race for the same poll: whoever fails to claim defers to the holder
   // (checkStagnantPolls tests the same key); the re-check under the claim skips
   // rows the holder already resolved.
-  await exclusively(`poll:${gameId}#${roundNumber}`, async () => {
-    if (!liveGame()) return;
+  await exclusively(claimKey.poll(poll.gameId, poll.round), async () => {
+    if (!livePollGame(handler.db, poll)) return;
     const tallies = early?.tallies ??
-      (await tallyPoll(handler.client, pollId, JSON.parse(optionMapJson) as Record<string, string>));
-    const game = liveGame();
+      (await tallyPoll(handler.client, poll.pollId, JSON.parse(poll.optionMapJson) as Record<string, string>));
+    const game = livePollGame(handler.db, poll);
     if (!game) return;
 
-    const outcome = resolveRound({
+    const result = persistPollResolution(handler, {
       game,
-      players: loadPlayers(db, gameId),
+      round: poll.round,
       tallies,
-      roundNumber,
-      now: handler.now(),
+      pollCleanupPending: early !== undefined,
     });
-    const winnerPlayer = outcome.players.find((p) => p.accountId === outcome.winnerAccountId);
-    const resolutionInput: TallyInput = {
-      round: roundNumber,
-      winnerAcct: winnerPlayer?.acct ?? null,
-      potAwarded: outcome.potAwarded,
-      wasTie: outcome.winnerAccountId === null,
-      newPot: outcome.game.pot,
-      potSplit: outcome.finalSplit,
-    };
-    db.transaction(() => {
-      if (!saveGameState(db, outcome.game, outcome.players, "ROUND")) {
-        throw new Error(`Game ${gameId} changed state before round ${roundNumber} could be resolved`);
-      }
-      markRoundResolved(
-        db,
-        gameId,
-        roundNumber,
-        outcome.winnerAccountId,
-        outcome.finalSplit ? { finalSplit: outcome.finalSplit } : {},
-        early !== undefined,
-        JSON.stringify(resolutionInput),
-      );
-    })();
-
-    const persistedGame = loadGame(db, gameId);
-    if (!persistedGame || isTerminal(persistedGame.status)) return;
+    if (!loadOpenGame(handler.db, poll.gameId)) return;
     if (early && !(await early.removePoll())) return;
-    if (!await postRoundResult(handler, gameId, roundNumber, resolutionInput)) return;
-    await advanceAfterRound(handler, gameId, roundNumber);
+    if (!await postRoundResult(handler, poll.gameId, poll.round, result)) return;
+    await advanceAfterRound(handler, poll.gameId, poll.round);
   });
+}
+
+/** The game while the poll is still the open poll of the round it is on; null otherwise. */
+function livePollGame(db: Db, poll: OpenPoll): Game | null {
+  if (!isPollOpen(db, poll.gameId, poll.round, poll.pollId)) return null;
+  const game = loadGame(db, poll.gameId);
+  return game?.status === "ROUND" && game.currentRound === poll.round ? game : null;
+}
+
+/**
+ * Score the round from its tallies and persist game, players and round in one
+ * transaction. Returns the result to post.
+ */
+function persistPollResolution(
+  handler: HandlerDeps,
+  resolution: { game: Game; round: number; tallies: Tally[]; pollCleanupPending: boolean },
+): TallyInput {
+  const db = handler.db;
+  const { game, round } = resolution;
+  const outcome = resolveRound({
+    game,
+    players: loadPlayers(db, game.id),
+    tallies: resolution.tallies,
+    roundNumber: round,
+    now: handler.now(),
+  });
+  const winner = outcome.players.find((p) => p.accountId === outcome.winnerAccountId);
+  const result: TallyInput = {
+    round,
+    winnerAcct: winner?.acct ?? null,
+    potAwarded: outcome.potAwarded,
+    wasTie: outcome.winnerAccountId === null,
+    newPot: outcome.game.pot,
+    potSplit: outcome.finalSplit,
+  };
+  db.transaction(() => {
+    if (!saveGameState(db, outcome.game, outcome.players, "ROUND")) {
+      throw new Error(`Game ${game.id} changed state before round ${round} could be resolved`);
+    }
+    markRoundResolved(db, game.id, round, {
+      winnerAccountId: outcome.winnerAccountId,
+      metaPatch: outcome.finalSplit ? { finalSplit: outcome.finalSplit } : {},
+      pollCleanupPending: resolution.pollCleanupPending,
+      resolutionJson: JSON.stringify(result),
+    });
+  })();
+  return result;
 }
 
 /**
@@ -425,40 +381,39 @@ async function resolvePollRow(
  * cancelled with a private notice.
  */
 async function resumeCreatedGames(handler: HandlerDeps): Promise<void> {
-  const rows = handler.db
-    .prepare(
-      `SELECT id, theme, creation_status_id, creation_visibility
-       FROM games WHERE status = 'CREATED' AND creation_status_id IS NOT NULL`,
-    )
-    .all() as { id: string; theme: string; creation_status_id: string; creation_visibility: string }[];
+  for (const creation of interruptedCreations(handler.db)) {
+    if (creation.creationVisibility === "private") {
+      await cancelPrivateCreation(handler, creation);
+    } else {
+      await finishCreation(handler, creation);
+    }
+  }
+}
 
-  for (const row of rows) {
-    if (row.creation_visibility === "private") {
-      if (!setGameStatus(handler.db, row.id, "CREATED", "CANCELLED", handler.now())) continue;
-      try {
-        await handler.client.post<{ id: string }>("/api/v1/statuses", {
-          status: m().sideCancelled(row.theme),
-          in_reply_to_id: row.creation_status_id,
-          visibility: "private",
-        }, { idempotencyKey: `pb:v1:creation:${row.creation_status_id}:private-cancel` });
-      } catch (err) {
-        handler.logger?.warn({ gameId: row.id, err }, "private creation cancellation notice failed");
-      }
-      continue;
-    }
-    try {
-      await completeCreation(
-        handler,
-        row.id,
-        row.creation_status_id,
-        row.creation_visibility === "unlisted" ? "unlisted" : "public",
-      );
-    } catch (err) {
-      handler.logger?.warn(
-        { gameId: row.id, err: err instanceof Error ? err.message : String(err) },
-        "created game recovery failed; will retry",
-      );
-    }
+async function cancelPrivateCreation(handler: HandlerDeps, creation: InterruptedCreation): Promise<void> {
+  if (!setGameStatus(handler.db, creation.id, "CREATED", "CANCELLED", handler.now())) return;
+  try {
+    await reply(handler, creation.creationStatusId, m().sideCancelled(creation.theme), "private", {
+      idempotencyKey: `pb:v1:creation:${creation.creationStatusId}:private-cancel`,
+    });
+  } catch (err) {
+    handler.logger?.warn({ gameId: creation.id, err }, "private creation cancellation notice failed");
+  }
+}
+
+async function finishCreation(handler: HandlerDeps, creation: InterruptedCreation): Promise<void> {
+  try {
+    await completeCreation(
+      handler,
+      creation.id,
+      creation.creationStatusId,
+      creation.creationVisibility === "unlisted" ? "unlisted" : "public",
+    );
+  } catch (err) {
+    handler.logger?.warn(
+      { gameId: creation.id, err: errorMessage(err) },
+      "created game recovery failed; will retry",
+    );
   }
 }
 
@@ -471,45 +426,52 @@ async function resumeCreatedGames(handler: HandlerDeps): Promise<void> {
  */
 export async function resumeOpenGames(deps: SchedulerDeps): Promise<void> {
   const { handler } = deps;
-  const db = handler.db;
-
   await resumeCreatedGames(handler);
   await checkDeadlines(deps);
   await checkPolls(deps);
 
-  // READY stuck: finished collection but never emitted round 1
-  const readies = db.prepare(`SELECT id FROM games WHERE status = 'READY'`).all() as { id: string }[];
-  for (const { id } of readies) {
-    if (!saveGame(db, startRound(loadGame(db, id)!, 1, handler.now()), "READY")) continue;
-    await emitRound(handler, id, 1);
-  }
+  const readyStuck = await startStuckReadyGames(handler);
+  const inFlightRounds = await resumeInFlightRounds(handler);
+  const stuckFinales = await resumeStuckFinales(handler);
 
-  const roundGames = db
-    .prepare("SELECT id, current_round FROM games WHERE status = 'ROUND'")
-    .all() as { id: string; current_round: number }[];
-  for (const { id, current_round } of roundGames) {
-    const round = current_round > 0 ? current_round : 1;
-    if (!await recoverRoundResults(handler, id, round)) continue;
-    const row = loadRound(db, id, round);
-    if (!row) {
-      await emitRound(handler, id, round);
-    } else if (RESOLVED_ROUND_STATUSES.includes(row.status)) {
-      await advanceAfterRound(handler, id, round);
-    }
-  }
+  handler.logger?.debug({ readyStuck, inFlightRounds, stuckFinales }, "game recovery sweep complete");
+}
 
-  // FINALE stuck: never posted/closed
-  const finales = db.prepare(`SELECT id FROM games WHERE status = 'FINALE'`).all() as { id: string }[];
-  for (const { id } of finales) {
-    await emitFinale(handler, id);
+/** READY games that finished collection but never emitted round 1. Returns how many. */
+async function startStuckReadyGames(handler: HandlerDeps): Promise<number> {
+  const gameIds = gameIdsWithStatus(handler.db, "READY");
+  for (const gameId of gameIds) {
+    const started = startRound(loadGame(handler.db, gameId)!, FIRST_ROUND, handler.now());
+    if (!saveGame(handler.db, started, "READY")) continue;
+    await emitRound(handler, gameId, FIRST_ROUND);
   }
+  return gameIds.length;
+}
 
-  handler.logger?.debug(
-    {
-      readyStuck: readies.length,
-      inFlightRounds: roundGames.length,
-      stuckFinales: finales.length,
-    },
-    "game recovery sweep complete",
-  );
+/** ROUND games: post any unposted results, then emit or advance the current round. Returns how many. */
+async function resumeInFlightRounds(handler: HandlerDeps): Promise<number> {
+  const games = gamesInRound(handler.db);
+  for (const { id, currentRound } of games) {
+    await resumeRound(handler, id, currentRound > 0 ? currentRound : FIRST_ROUND);
+  }
+  return games.length;
+}
+
+async function resumeRound(handler: HandlerDeps, gameId: string, round: number): Promise<void> {
+  if (!await recoverRoundResults(handler, gameId, round)) return;
+  const persisted = loadRound(handler.db, gameId, round);
+  if (!persisted) {
+    await emitRound(handler, gameId, round);
+  } else if (RESOLVED_ROUND_STATUSES.includes(persisted.status)) {
+    await advanceAfterRound(handler, gameId, round);
+  }
+}
+
+/** FINALE games that never posted their finale or closed. Returns how many. */
+async function resumeStuckFinales(handler: HandlerDeps): Promise<number> {
+  const gameIds = gameIdsWithStatus(handler.db, "FINALE");
+  for (const gameId of gameIds) {
+    await emitFinale(handler, gameId);
+  }
+  return gameIds.length;
 }

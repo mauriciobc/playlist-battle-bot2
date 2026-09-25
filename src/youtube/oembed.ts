@@ -1,5 +1,8 @@
 import type { Db } from "../db/index.js";
+import { cacheVideo, readCachedVideo, type CachedVideo } from "../db/videoCache.js";
 import { normalizeYouTubeUrl } from "./normalize.js";
+
+const OEMBED_TIMEOUT_MS = 10_000;
 
 class UnresolvableVideoError extends Error {
   override readonly name = "UnresolvableVideoError";
@@ -20,7 +23,7 @@ export type ResolvedTune = {
 function fetchOembed(canonicalUrl: string, fetchImpl: typeof fetch = fetch): Promise<Response> {
   return fetchImpl(`https://www.youtube.com/oembed?url=${encodeURIComponent(canonicalUrl)}&format=json`, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(OEMBED_TIMEOUT_MS),
   });
 }
 
@@ -46,16 +49,21 @@ export async function resolveTitle(
     throw new UnresolvableVideoError(videoId, "invalid video ID");
   }
 
-  const cached = opts.db
-    .prepare("SELECT title, author FROM video_cache WHERE video_id = ?")
-    .get(videoId) as { title: string; author: string | null } | undefined;
+  const cached = readCachedVideo(opts.db, videoId);
   if (cached) {
     return { videoId, title: cached.title, author: cached.author, canonicalUrl };
   }
 
+  const video = await fetchVideo(videoId, canonicalUrl, opts.fetchImpl);
+  cacheVideo(opts.db, videoId, video, new Date());
+  return { videoId, title: video.title, author: video.author, canonicalUrl };
+}
+
+/** Title and author from oEmbed; throws UnresolvableVideoError when there is no usable title. */
+async function fetchVideo(videoId: string, canonicalUrl: string, fetchImpl?: typeof fetch): Promise<CachedVideo> {
   let res: Response;
   try {
-    res = await fetchOembed(canonicalUrl, opts.fetchImpl);
+    res = await fetchOembed(canonicalUrl, fetchImpl);
   } catch (err) {
     throw new UnresolvableVideoError(videoId, `oEmbed request failed: ${String(err)}`);
   }
@@ -73,14 +81,7 @@ export async function resolveTitle(
   if (!title) {
     throw new UnresolvableVideoError(videoId, "oEmbed response has no title");
   }
-
-  opts.db
-    .prepare(
-      "INSERT OR REPLACE INTO video_cache (video_id, title, author, fetched_at) VALUES (?, ?, ?, ?)",
-    )
-    .run(videoId, title, author, new Date().toISOString());
-
-  return { videoId, title, author, canonicalUrl };
+  return { title, author };
 }
 
 /**
@@ -98,7 +99,8 @@ export async function checkAvailable(
   if (!canonicalUrl) return false;
   try {
     const res = await fetchOembed(canonicalUrl, opts.fetchImpl);
-    if (res.status >= 400 && res.status < 500 && res.status !== 429) return false;
+    const rejectedForGood = res.status >= 400 && res.status < 500 && res.status !== 429;
+    if (rejectedForGood) return false;
     if (!res.ok) return true;
     return (await readOembed(res)).title !== null;
   } catch {

@@ -2,11 +2,10 @@ import { describe, expect, it } from "vitest";
 import { TERMINAL_STATUSES } from "../src/game/types.js";
 import {
   deferUntilNotifications,
-  lastHostedCreation,
-  openGamesForAccount,
   recordNotificationFailure,
   releasePendingNotificationClaims,
-} from "../src/game/store.js";
+} from "../src/db/notifications.js";
+import { lastHostedCreation, openGamesForAccount } from "../src/db/games.js";
 import { NOW, seedGame, seedPlayer, useHarness } from "./support.js";
 
 const h = useHarness();
@@ -76,15 +75,25 @@ describe("releasePendingNotificationClaims", () => {
  */
 describe("deferUntilNotifications", () => {
   it("holds a rate-limited notification until its reset, then releases it", () => {
-    recordNotificationFailure(h.db, "limited", 1, "rate limit exhausted", "2026-09-24T14:05:00.000Z", null);
+    recordNotificationFailure(h.db, "limited", {
+      attempts: 1,
+      lastError: "rate limit exhausted",
+      nextAttemptAt: "2026-09-24T14:05:00.000Z",
+      deadLetteredAt: null,
+    });
 
     expect([...deferUntilNotifications(h.db, new Date("2026-09-24T14:00:00.000Z"))]).toEqual(["limited"]);
     expect([...deferUntilNotifications(h.db, new Date("2026-09-24T14:06:00.000Z"))]).toEqual([]);
   });
 
   it("never defers dead-lettered or unscheduled failures", () => {
-    recordNotificationFailure(h.db, "dead", 3, "poison", "2099-01-01T00:00:00.000Z", "2026-09-24T14:00:00.000Z");
-    recordNotificationFailure(h.db, "plain", 1, "boom", null, null);
+    recordNotificationFailure(h.db, "dead", {
+      attempts: 3,
+      lastError: "poison",
+      nextAttemptAt: "2099-01-01T00:00:00.000Z",
+      deadLetteredAt: "2026-09-24T14:00:00.000Z",
+    });
+    recordNotificationFailure(h.db, "plain", { attempts: 1, lastError: "boom", nextAttemptAt: null, deadLetteredAt: null });
 
     expect(deferUntilNotifications(h.db, new Date("2026-09-24T14:00:00.000Z")).size).toBe(0);
   });

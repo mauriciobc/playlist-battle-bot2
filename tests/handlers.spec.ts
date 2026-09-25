@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { handlePublicCommand, handleDm } from "../src/handlers/mention.js";
+import { handlePublicCommand } from "../src/handlers/publicCommand.js";
+import { handleDm } from "../src/handlers/directMessage.js";
 import { MastodonApiError } from "../src/mastodon/client.js";
 import { m } from "../src/i18n/index.js";
 import { accept, count, gameRow, input, newGame, useHarness } from "./support.js";
@@ -148,6 +149,16 @@ describe("handlers integration", () => {
       { account_id: "id-host", position: 1, video_id: "dQw4w9WgXcQ", title: "Title for dQw4w9WgXcQ" },
     ]);
     expect(h.texts().at(-1)).toContain("Title for dQw4w9WgXcQ");
+  });
+
+  it("collects a playlist link sent as a reply to the bot's DM", async () => {
+    await newGame(h.deps);
+    await accept(h.deps, "id-alice");
+
+    const result = await handleDm(input("id-alice", "<p>https://youtu.be/aaaaaaaaaaa</p>", { inReplyToId: "s-2" }), h.deps);
+
+    expect(result).toMatchObject({ handled: true, kind: "tune_accepted" });
+    expect(count(h.db, "tunes")).toBe(1);
   });
 
   it("rejects non-YouTube link without counting it", async () => {

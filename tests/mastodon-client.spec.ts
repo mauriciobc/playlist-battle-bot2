@@ -177,14 +177,14 @@ describe("MastodonClient", () => {
   it("parses Link header for pagination helpers", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse([{ id: "1" }], 200, {
-        Link: '<https://mastodon.example/api/v1/notifications?max_id=99>; rel="next"',
+        Link: '<https://mastodon.example/api/v1/notifications?max_id=99>; rel="next", <https://mastodon.example/api/v1/notifications?min_id=120>; rel="prev"',
       }),
     );
-    const { data, linkNext } = await client.getWithLink<Array<{ id: string }>>(
+    const { data, linkPrev } = await client.getWithLink<Array<{ id: string }>>(
       "/api/v1/notifications",
     );
     expect(data).toEqual([{ id: "1" }]);
-    expect(linkNext).toBe("https://mastodon.example/api/v1/notifications?max_id=99");
+    expect(linkPrev).toBe("https://mastodon.example/api/v1/notifications?min_id=120");
   });
 
   describe("outbox ledger", () => {

@@ -5,9 +5,18 @@
 
 export type NotificationCursor = { lastId: string };
 
+/** Visibilities a public command may arrive with (a DM is `direct`). */
+export type PublicVisibility = "public" | "unlisted" | "private";
+
+const PUBLIC_VISIBILITIES: readonly string[] = ["public", "unlisted", "private"] satisfies PublicVisibility[];
+
+function isPublicVisibility(visibility: string): visibility is PublicVisibility {
+  return PUBLIC_VISIBILITIES.includes(visibility);
+}
+
 type MentionStatus = {
   id: string;
-  visibility: "public" | "unlisted" | "private" | "direct" | string;
+  visibility: PublicVisibility | "direct" | string;
   in_reply_to_id: string | null;
   content: string;
   mentions: { id: string; username: string; acct: string }[];
@@ -21,24 +30,17 @@ export type RawNotification = {
   status: MentionStatus | null;
 };
 
+type CommandFields = {
+  statusId: string;
+  accountId: string;
+  accountAcct: string;
+  content: string;
+  inReplyToId: string | null;
+};
+
 export type Classified =
-  | {
-      kind: "public_command";
-      statusId: string;
-      accountId: string;
-      accountAcct: string;
-       content: string;
-       inReplyToId: string | null;
-       visibility: "public" | "unlisted" | "private";
-     }
-   | {
-       kind: "dm";
-      statusId: string;
-      accountId: string;
-      accountAcct: string;
-      content: string;
-      inReplyToId: string | null;
-    }
+  | ({ kind: "public_command"; visibility: PublicVisibility } & CommandFields)
+  | ({ kind: "dm" } & CommandFields)
   | { kind: "poll_expired"; statusId: string | null };
 
 export function classifyNotification(n: RawNotification, botAcct: string): Classified | null {
@@ -49,11 +51,11 @@ export function classifyNotification(n: RawNotification, botAcct: string): Class
   if (n.type !== "mention" || !n.status) return null;
 
   const mentioned = n.status.mentions.some(
-    (m) => m.username.toLowerCase() === botAcct.toLowerCase(),
+    (mention) => mention.username.toLowerCase() === botAcct.toLowerCase(),
   );
   if (!mentioned) return null;
 
-  const base = {
+  const fields: CommandFields = {
     statusId: n.status.id,
     accountId: n.account.id,
     accountAcct: n.account.acct,
@@ -61,17 +63,10 @@ export function classifyNotification(n: RawNotification, botAcct: string): Class
     inReplyToId: n.status.in_reply_to_id,
   };
 
-  if (n.status.visibility === "direct") {
-    return { kind: "dm", ...base };
-  }
-  if (
-    n.status.visibility !== "public" &&
-    n.status.visibility !== "unlisted" &&
-    n.status.visibility !== "private"
-  ) {
-    return null;
-  }
-  return { kind: "public_command", ...base, visibility: n.status.visibility };
+  const { visibility } = n.status;
+  if (visibility === "direct") return { kind: "dm", ...fields };
+  if (!isPublicVisibility(visibility)) return null;
+  return { kind: "public_command", ...fields, visibility };
 }
 
 /** Cursor only moves forward (crash-safe: advance after successful handling). */

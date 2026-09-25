@@ -1,11 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDatabase, migrate, type Db } from "../src/db/index.js";
-import {
-  clearNotificationFailure,
-  recordNotificationFailure,
-  markPendingOutboxEffectsUnknown,
-  touchLoopHeartbeat,
-} from "../src/game/store.js";
+import { clearNotificationFailure, recordNotificationFailure } from "../src/db/notifications.js";
+import { markPendingOutboxEffectsUnknown } from "../src/db/outbox.js";
+import { touchLoopHeartbeat } from "../src/db/heartbeats.js";
 
 let db: Db;
 
@@ -138,7 +135,12 @@ describe("store bookkeeping tables", () => {
       db.prepare(
         "SELECT notification_id, attempts, last_error FROM notification_failures WHERE dead_lettered_at IS NOT NULL",
       ).all();
-    recordNotificationFailure(db, "n-1", 3, "HTTP 500", null, "2026-09-21T12:00:00.000Z");
+    recordNotificationFailure(db, "n-1", {
+      attempts: 3,
+      lastError: "HTTP 500",
+      nextAttemptAt: null,
+      deadLetteredAt: "2026-09-21T12:00:00.000Z",
+    });
     expect(deadLettered()).toEqual([{ notification_id: "n-1", attempts: 3, last_error: "HTTP 500" }]);
     clearNotificationFailure(db, "n-1");
     expect(deadLettered()).toHaveLength(0);

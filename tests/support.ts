@@ -1,12 +1,8 @@
 import { afterEach, beforeEach, vi, type Mock } from "vitest";
 import { migrate, openDatabase, type Db } from "../src/db/index.js";
-import {
-  handleDm,
-  handlePublicCommand,
-  type CommandInput,
-  type HandlerDeps,
-  type HandlerResult,
-} from "../src/handlers/mention.js";
+import type { CommandInput, HandlerDeps, HandlerResult } from "../src/handlers/deps.js";
+import { handlePublicCommand } from "../src/handlers/publicCommand.js";
+import { handleDm } from "../src/handlers/directMessage.js";
 import { checkPollNotification, type SchedulerDeps } from "../src/scheduler/index.js";
 import type { MastodonClient } from "../src/mastodon/client.js";
 import type { RawNotification } from "../src/mastodon/notifications.js";
@@ -37,8 +33,8 @@ type FakeClient = {
   rateLimit: null;
   /** Notification fetches drain `Harness.inbox`; poll fetches answer `Harness.poll`. */
   get: Mock<(path: string) => Promise<unknown>>;
-  /** The real client follows Mastodon's Link header; the fake serves one page. */
-  getWithLink: Mock<(path: string) => Promise<{ data: unknown; linkNext: string | null }>>;
+  /** The real client follows Mastodon's Link header (rel="prev"); the fake serves one page. */
+  getWithLink: Mock<(path: string) => Promise<{ data: unknown; linkPrev: string | null }>>;
   post: Mock<(path: string, body?: PostBody) => Promise<unknown>>;
   delete: Mock<(path: string) => Promise<unknown>>;
 };
@@ -85,7 +81,7 @@ export function createHarness(opts: HarnessOpts = {}): Harness {
   const client: FakeClient = {
     rateLimit: null,
     get,
-    getWithLink: vi.fn(async (path: string) => ({ data: await get(path), linkNext: null })),
+    getWithLink: vi.fn(async (path: string) => ({ data: await get(path), linkPrev: null })),
     post: vi.fn(async (path: string, body: PostBody = {}): Promise<unknown> => {
       if (opts.failDm && body.visibility === "direct") throw opts.failDm;
       posts.push({ path, body });

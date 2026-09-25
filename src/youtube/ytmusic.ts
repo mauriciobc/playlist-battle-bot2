@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { toUnixSeconds } from "../time.js";
 
 /**
  * Minimal authenticated YouTube Music (InnerTube) client — exactly the two
@@ -22,6 +23,7 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0";
 const SAPISID_COOKIE = "__Secure-3PAPISID";
 const SUCCESS = "STATUS_SUCCEEDED";
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export type PlaylistPrivacy = "PUBLIC" | "PRIVATE" | "UNLISTED";
 
@@ -170,7 +172,7 @@ export class YtMusicPlaylistClient {
           "user-agent": USER_AGENT,
         },
         body,
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {
       throw new YtMusicError("transport", `${path}: request failed`, { cause: err });
@@ -212,7 +214,7 @@ export class YtMusicPlaylistClient {
   }
 
   private sapisidHash(): string {
-    const timestamp = Math.floor(Date.now() / 1000);
+    const timestamp = toUnixSeconds(Date.now());
     const digest = createHash("sha1")
       .update(`${timestamp} ${this.sapisid} ${ORIGIN}`)
       .digest("hex");

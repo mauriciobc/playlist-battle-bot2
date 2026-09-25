@@ -135,6 +135,23 @@ describe("MockMastodon: notifications (REST::NotificationSerializer)", () => {
     const body = (await res.json()) as Array<{ id: string }>;
     expect(body.map((n) => n.id)).toEqual([b]);
   });
+
+  it("pages forward from min_id, oldest first, with a rel=prev link", async () => {
+    const a = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+    const b = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+    const c = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+
+    const res = await fetch(url(server, `/api/v1/notifications?min_id=${a}&limit=1`), { headers: AUTH });
+    const body = (await res.json()) as Array<{ id: string }>;
+    expect(body.map((n) => n.id)).toEqual([b]);
+    const link = res.headers.get("Link");
+    expect(link).toContain('rel="prev"');
+    expect(link).toContain(`min_id=${b}`);
+
+    const last = await fetch(url(server, `/api/v1/notifications?min_id=${c}`), { headers: AUTH });
+    expect(await last.json()).toEqual([]);
+    expect(last.headers.get("Link")).toBeNull();
+  });
 });
 
 describe("MockMastodon: statuses (REST::StatusSerializer)", () => {

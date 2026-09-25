@@ -26,6 +26,21 @@ export const TERMINAL_STATUSES: readonly GameStatus[] = [
   "CANCELLED",
 ];
 
+/** Tunes per playlist — and therefore rounds per duel. */
+export const MIN_PLAYLIST_LENGTH = 8;
+export const MAX_PLAYLIST_LENGTH = 12;
+
+/** A duel needs two players; Mastodon polls carry at most four options, one per player. */
+export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 4;
+export const MAX_CHALLENGERS = MAX_PLAYERS - 1;
+
+export const FIRST_ROUND = 1;
+
+export function isValidPlaylistLength(length: number): boolean {
+  return length >= MIN_PLAYLIST_LENGTH && length <= MAX_PLAYLIST_LENGTH;
+}
+
 export type Player = {
   accountId: string;
   acct: string; // account handle for mentions (user@domain when remote)
@@ -42,6 +57,15 @@ export type Tune = {
   title: string;
   canonicalUrl: string;
 };
+
+/** A tune as resolved from YouTube, before it takes a playlist position. */
+export type TuneDraft = Pick<Tune, "videoId" | "title" | "canonicalUrl">;
+
+/** Votes one player's tune received in a round poll. */
+export type Tally = { accountId: string; votes: number };
+
+/** Final-round pot split: `count` tied players get `each` points, `total` in all. */
+export type PotSplit = { total: number; each: number; count: number };
 
 export type Game = {
   id: string;

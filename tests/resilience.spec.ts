@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { processNotification } from "../src/handlers/mention.js";
+import { processNotification } from "../src/handlers/notification.js";
 import { handlePlayerDeleted } from "../src/handlers/closure.js";
-import { readCursor, recordNotificationFailure, writeCursor } from "../src/game/store.js";
+import { readCursor, recordNotificationFailure, writeCursor } from "../src/db/notifications.js";
 import { initializeNotificationCursor, pollNotifications } from "../src/mastodon/poller.js";
 import { RateLimitError, type MastodonClient } from "../src/mastodon/client.js";
 import { m } from "../src/i18n/index.js";
@@ -106,7 +106,7 @@ describe("notification pipeline resilience", () => {
       expect(readCursor(h.db).lastId).toBe("");
       expect(count(h.db, "processed_notifications")).toBe(0);
 
-      // healed: the same notification is re-fetched (since_id still empty)
+      // healed: the same notification is re-fetched (min_id still empty)
       h.inbox.push(n);
       await pollNotifications(h.deps);
       expect(readCursor(h.db).lastId).toBe("101");
@@ -114,15 +114,55 @@ describe("notification pipeline resilience", () => {
       expect(h.posts).toHaveLength(1);
     });
 
-    /** Two notification pages: 702 first, then 701 behind a `page=2` link. */
+    /** Two notification pages, oldest first: 701, then 702 behind a `page=2` prev link. */
     function pagedDeps() {
       const getWithLink = vi.fn(async (path: string) =>
         path.includes("page=2")
-          ? { data: [mentionNotification("701", STATUS)], linkNext: null }
-          : { data: [mentionNotification("702", STATUS)], linkNext: "page=2" },
+          ? { data: [mentionNotification("702", STATUS)], linkPrev: null }
+          : { data: [mentionNotification("701", STATUS)], linkPrev: "page=2" },
       );
       return { getWithLink, deps: { ...h.deps, client: { ...h.client, getWithLink } as unknown as MastodonClient } };
     }
+
+    it("asks for the notifications after the cursor with min_id", async () => {
+      writeCursor(h.db, { lastId: "100" });
+
+      await pollNotifications(h.deps);
+
+      expect(h.client.getWithLink.mock.calls[0]![0]).toBe(
+        "/api/v1/notifications?min_id=100&exclude_types[]=follow&exclude_types[]=favourite&exclude_types[]=reblog",
+      );
+    });
+
+    it("pages from the very first notification when the cursor is empty", async () => {
+      await pollNotifications(h.deps);
+
+      expect(h.client.getWithLink.mock.calls[0]![0]).toBe(
+        "/api/v1/notifications?min_id=0&exclude_types[]=follow&exclude_types[]=favourite&exclude_types[]=reblog",
+      );
+    });
+
+    it("a deferred notification ends the whole tick, so a newer page cannot move the cursor past it", async () => {
+      const getWithLink = vi.fn(async (path: string) =>
+        path.includes("page=2")
+          ? { data: [mentionNotification("703", STATUS)], linkPrev: null }
+          : { data: [mentionNotification("701", STATUS), mentionNotification("702", STATUS)], linkPrev: "page=2" },
+      );
+      const deps = { ...h.deps, client: { ...h.client, getWithLink } as unknown as MastodonClient };
+      recordNotificationFailure(h.db, "702", {
+        attempts: 1,
+        lastError: "rate limit exhausted",
+        nextAttemptAt: "2026-09-21T12:20:00.000Z",
+        deadLetteredAt: null,
+      });
+      deps.now = () => new Date("2026-09-21T12:10:00.000Z");
+
+      await pollNotifications(deps);
+
+      expect(getWithLink).toHaveBeenCalledTimes(1);
+      expect(readCursor(h.db).lastId).toBe("701");
+      expect(count(h.db, "processed_notifications")).toBe(1);
+    });
 
     it("processes every notification page before finishing a poll", async () => {
       const { getWithLink, deps } = pagedDeps();
@@ -145,7 +185,7 @@ describe("notification pipeline resilience", () => {
     });
 
     it("initializes a first-boot cursor without processing historical notifications", async () => {
-      const getWithLink = vi.fn(async () => ({ data: [mentionNotification("800", STATUS)], linkNext: null }));
+      const getWithLink = vi.fn(async () => ({ data: [mentionNotification("800", STATUS)], linkPrev: null }));
 
       await initializeNotificationCursor({ db: h.db, client: { ...h.client, getWithLink } as unknown as MastodonClient });
 
@@ -154,11 +194,16 @@ describe("notification pipeline resilience", () => {
     });
 
     it("holds the cursor before a rate-limited notification until its reset, then moves past it", async () => {
-      // The next poll asks since_id = cursor, so advancing past a deferred
+      // The next poll asks min_id = cursor, so advancing past a deferred
       // notification drops it for good: in production the cursor landed on the
       // stuck id and the newgame it carried never became a game.
       writeCursor(h.db, { lastId: "100" });
-      recordNotificationFailure(h.db, "101", 1, "rate limit exhausted", "2026-09-21T12:20:00.000Z", null);
+      recordNotificationFailure(h.db, "101", {
+        attempts: 1,
+        lastError: "rate limit exhausted",
+        nextAttemptAt: "2026-09-21T12:20:00.000Z",
+        deadLetteredAt: null,
+      });
       const tick = async (at: string) => {
         h.deps.now = () => new Date(at);
         h.inbox.push(mentionNotification("101", STATUS), mentionNotification("102", STATUS));

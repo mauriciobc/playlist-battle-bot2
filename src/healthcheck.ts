@@ -1,19 +1,17 @@
 import Database from "better-sqlite3";
-import { LOOP_LABELS } from "./game/store.js";
+import { LOOP_LABELS, loopHeartbeats } from "./db/heartbeats.js";
+import { MS_PER_SECOND, SECONDS_PER_MINUTE } from "./time.js";
+
+/** A loop that has not succeeded in ten minutes is stuck. */
+const STALE_AFTER_MS = 10 * SECONDS_PER_MINUTE * MS_PER_SECOND;
 
 const path = process.env.DB_PATH ?? "./data/bot.db";
 const db = new Database(path, { readonly: true, fileMustExist: true });
-const rows = db
-  .prepare(
-    `SELECT loop, last_success_at FROM loop_heartbeats WHERE loop IN (${LOOP_LABELS.map(() => "?").join(", ")})`,
-  )
-  .all(...LOOP_LABELS) as { loop: string; last_success_at: string }[];
+const lastSuccess = loopHeartbeats(db);
 const now = Date.now();
-/** A loop that has not succeeded in ten minutes is stuck. */
 const healthy = LOOP_LABELS.every((loop) => {
-  const row = rows.find((candidate) => candidate.loop === loop);
-  const last = row?.last_success_at ? Date.parse(row.last_success_at) : NaN;
-  return Number.isFinite(last) && now - last <= 10 * 60 * 1000;
+  const last = Date.parse(lastSuccess.get(loop) ?? "");
+  return Number.isFinite(last) && now - last <= STALE_AFTER_MS;
 });
 db.close();
 

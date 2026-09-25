@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { PlaylistPrivacy } from "./youtube/ytmusic.js";
+import { MAX_PLAYLIST_LENGTH } from "./game/types.js";
+import { SECONDS_PER_HOUR, SECONDS_PER_MINUTE } from "./time.js";
 
 /** Mastodon allows polls from 5 minutes to 7 days. */
 const POLL_MIN_SEC = 300;
@@ -193,8 +195,7 @@ export type BotConfig = {
   autoDeleteUnsafe: boolean;
 };
 
-/** Worst-case rounds = max playlist length; margin = 2 extra poll durations (scheduling overhead). */
-const MAX_PLAYLIST_LENGTH = 12;
+/** Scheduling overhead in the worst-case game length: 2 extra poll durations. */
 const AUTO_DELETE_MARGIN_POLLS = 2;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
@@ -222,7 +223,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const worstCaseGameSec =
     e.ACCEPTANCE_WINDOW_SEC +
     e.SUBMISSION_WINDOW_SEC +
-    (e.POLL_DURATION_SEC + e.REPLACEMENT_GRACE_MIN * 60) * MAX_PLAYLIST_LENGTH +
+    (e.POLL_DURATION_SEC + e.REPLACEMENT_GRACE_MIN * SECONDS_PER_MINUTE) * MAX_PLAYLIST_LENGTH +
     e.POLL_DURATION_SEC * AUTO_DELETE_MARGIN_POLLS;
   const cadence = LOOP_CADENCE_SEC[runMode];
 
@@ -255,6 +256,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     locale: e.LOCALE,
     // 0 means "unknown / no auto-delete" → never flagged as unsafe
     autoDeleteUnsafe:
-      e.AUTO_DELETE_WINDOW_HOURS > 0 && e.AUTO_DELETE_WINDOW_HOURS * 3600 < worstCaseGameSec,
+      e.AUTO_DELETE_WINDOW_HOURS > 0 && e.AUTO_DELETE_WINDOW_HOURS * SECONDS_PER_HOUR < worstCaseGameSec,
   };
 }

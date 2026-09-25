@@ -13,7 +13,7 @@
 import { pathToFileURL } from "node:url";
 
 import { openDatabase, migrate, type Db } from "../src/db/index.js";
-import { type HandlerDeps } from "../src/handlers/mention.js";
+import type { HandlerDeps } from "../src/handlers/deps.js";
 import { handlePlayerDeleted } from "../src/handlers/closure.js";
 import { pollNotifications } from "../src/mastodon/poller.js";
 import {
@@ -22,7 +22,9 @@ import {
   checkPolls,
   type SchedulerDeps,
 } from "../src/scheduler/index.js";
-import { loadGame, loadPlayers, loadTunes } from "../src/game/store.js";
+import { loadGame } from "../src/db/games.js";
+import { loadPlayers } from "../src/db/players.js";
+import { loadTunes } from "../src/db/tunes.js";
 import { mulberry32 } from "../src/game/shuffle.js";
 import type { Game, Player } from "../src/game/types.js";
 import type { MastodonClient } from "../src/mastodon/client.js";
@@ -219,8 +221,8 @@ export class Harness {
     };
     const client = {
       get,
-      // The real client follows Mastodon's Link header; the console serves one page.
-      getWithLink: async (path: string) => ({ data: await get(path), linkNext: null }),
+      // The real client follows Mastodon's Link header (rel="prev"); the console serves one page.
+      getWithLink: async (path: string) => ({ data: await get(path), linkPrev: null }),
       post: async (path: string, body?: unknown) => {
         if (path !== "/api/v1/statuses") throw new Error(`console client: unexpected POST ${path}`);
         const payload = (body ?? {}) as Record<string, unknown>;

@@ -64,15 +64,14 @@ describe("resolveRoundScore", () => {
 describe("splitPotAmong (v1.1 1.3)", () => {
   it("divides pot equally among tied players, remainder discarded", () => {
     const out = splitPotAmong([player("a"), player("b"), player("c")], ["a", "b"], 5);
-    expect(out.splitEach).toBe(2);
-    expect(out.splitTotal).toBe(4);
+    expect(out.split).toEqual({ total: 4, each: 2, count: 2 });
     expect(out.players.map((p) => p.points)).toEqual([2, 2, 0]);
   });
 
   it("empty tied list, non-positive pot, or pot smaller than the tie → no-op", () => {
-    expect(splitPotAmong([player("a")], [], 5)).toMatchObject({ splitTotal: 0, splitEach: 0 });
-    expect(splitPotAmong([player("a")], ["a"], 0)).toMatchObject({ splitTotal: 0, splitEach: 0 });
-    expect(splitPotAmong([player("a")], ["a", "b"], 1)).toMatchObject({ splitTotal: 0, splitEach: 0 });
+    expect(splitPotAmong([player("a")], [], 5).split).toBeNull();
+    expect(splitPotAmong([player("a")], ["a"], 0).split).toBeNull();
+    expect(splitPotAmong([player("a")], ["a", "b"], 1).split).toBeNull();
   });
 });
 

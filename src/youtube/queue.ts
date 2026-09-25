@@ -8,6 +8,8 @@
  * request, so the resolved link is persisted by the finale workflow before posting.
  */
 
+const QUEUE_TIMEOUT_MS = 10_000;
+
 /**
  * Resolve `videoIds` (in play order) into a shareable queue URL, or null when
  * YouTube does not answer with a playlist redirect. A finale must still post
@@ -21,7 +23,7 @@ export async function resolveQueueUrl(
     // A followed redirect would return the final page instead of the URL.
     const res = await (opts.fetchImpl ?? fetch)(
       `https://www.youtube.com/watch_videos?video_ids=${videoIds.join(",")}`,
-      { redirect: "manual", signal: AbortSignal.timeout(10_000) },
+      { redirect: "manual", signal: AbortSignal.timeout(QUEUE_TIMEOUT_MS) },
     );
     const location = res.headers.get("location");
     return location?.startsWith("https://www.youtube.com/watch?") && location.includes("list=")

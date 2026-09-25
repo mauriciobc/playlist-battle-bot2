@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { pollNotifications } from "../src/mastodon/poller.js";
-import { readCursor } from "../src/game/store.js";
+import { readCursor } from "../src/db/notifications.js";
 import { m } from "../src/i18n/index.js";
 import {
   count,

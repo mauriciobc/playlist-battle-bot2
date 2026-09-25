@@ -5,7 +5,6 @@
 
 export type Locale = "en" | "pt-BR";
 
-
 const en = {
   // commands.ts
   cmdUsage: () =>
@@ -44,7 +43,7 @@ const en = {
   errConcurrentGames: (n: number, max: number) => `You already have ${n} active games (max ${max}).`,
   errCooldown: (retryAt: string) => `Game creation cooldown: try again after ${retryAt}.`,
 
-  // mention.ts
+  // handlers: public commands and DMs
   errPrivateCreate: () =>
     "Create duels with a public or unlisted mention; private posts cannot host the public round thread.",
   gameCreated: (theme: string, length: number, players: number, deadline: string, gameId: string) =>

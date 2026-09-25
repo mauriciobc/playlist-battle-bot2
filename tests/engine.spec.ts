@@ -153,7 +153,7 @@ describe("submitTune (PRD §5.3)", () => {
   it("rejects submission after the submission deadline", () => {
     const expired = { ...collecting, submissionDeadline: "2026-09-22T12:00:00.000Z" };
     expect(() =>
-      submitTune(expired, players, [], "host1", draft("late0000001"), undefined, new Date("2026-09-23T00:00:00.000Z")),
+      submitTune(expired, players, [], "host1", draft("late0000001"), new Date("2026-09-23T00:00:00.000Z")),
     ).toThrow(/not accepting|collecting|submission/i);
   });
 });
@@ -172,7 +172,7 @@ describe("finalizeCollection (PRD §5.4, §7; v1.1 1.1 full commitment)", () => 
         ...draft(`${p.accountId}${String(i).padStart(9, "0")}`),
       })),
     );
-    return finalizeCollection(collecting, players, tunes, 8, NOW);
+    return finalizeCollection(collecting, players, tunes, NOW);
   }
 
   it("all complete → READY", () => {

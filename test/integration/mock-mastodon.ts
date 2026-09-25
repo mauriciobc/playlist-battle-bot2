@@ -241,7 +241,9 @@ export class MockMastodonServer {
    * Notifications are newest-first, as Mastodon's NotificationsController
    * orders them. `since_id` and `max_id` are exclusive bounds, `limit` caps
    * the page, and a further page is advertised with a `Link` header
-   * (`rel="next"`), which is what the bot's getWithLink() follows.
+   * (`rel="next"`). `min_id` pages forward instead: the `limit` oldest after
+   * it, with a `rel="prev"` link to newer ones, which is what the bot's
+   * getWithLink() follows.
    */
   private notifications(
     res: ServerResponse,
@@ -262,6 +264,21 @@ export class MockMastodonServer {
     if (sinceId) items = items.filter((n) => Number(n.id) > Number(sinceId));
     if (maxId) items = items.filter((n) => Number(n.id) < Number(maxId));
     if (excluded.size > 0) items = items.filter((n) => !excluded.has(n.type));
+
+    const minId = path.searchParams.get("min_id");
+    if (minId) {
+      // Paginable#paginate_by_min_id: the `limit` oldest after min_id, served
+      // newest-first; rel="prev" (min_id = newest on the page) leads to newer ones.
+      const after = items.filter((n) => Number(n.id) > Number(minId)).reverse();
+      const forward = after.slice(0, limit).reverse();
+      const newest = forward[0];
+      if (newest !== undefined) {
+        const query = new URLSearchParams(path.searchParams);
+        query.set("min_id", newest.id);
+        res.setHeader("Link", `<${this.baseUrl}/api/v1/notifications?${query.toString()}>; rel="prev"`);
+      }
+      return json(res, 200, forward.map((n) => this.state.serializeNotification(n, viewer)));
+    }
 
     const page = items.slice(0, limit);
     const rest = items.slice(limit);
