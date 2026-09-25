@@ -23,6 +23,7 @@
 
 import { performance } from "node:perf_hooks";
 
+import { migrate, openDatabase, type Db } from "../src/db/index.js";
 import { setLocale } from "../src/i18n/index.js";
 import { Harness, SCENARIOS, type Scenario } from "./e2e-console.js";
 
@@ -56,9 +57,9 @@ function cpuUs(): number {
 }
 
 /** One scenario: the game itself is measured, the assertions that follow are not. */
-async function runScenario(pass: Pass, scenario: Scenario): Promise<PassResult> {
+async function runScenario(connection: Db, pass: Pass, scenario: Scenario): Promise<PassResult> {
   const votes = pass.random ? null : scenario.votes;
-  const h = new Harness(votes, pass.seed, scenario.expectedStatuses ?? []);
+  const h = new Harness(votes, pass.seed, scenario.expectedStatuses ?? [], connection);
   const errors: string[] = [];
   const cpuStart = cpuUs();
   const started = performance.now();
@@ -83,13 +84,13 @@ async function runScenario(pass: Pass, scenario: Scenario): Promise<PassResult> 
     failed: failed.length,
     errors: [...errors, ...failedDetails],
   };
-  h.db.close();
+  h.close();
   return result;
 }
 
-async function runPass(pass: Pass): Promise<PassResult> {
+async function runPass(connection: Db, pass: Pass): Promise<PassResult> {
   const results: PassResult[] = [];
-  for (const scenario of SCENARIOS) results.push(await runScenario(pass, scenario));
+  for (const scenario of SCENARIOS) results.push(await runScenario(connection, pass, scenario));
   return {
     label: pass.label,
     ms: sum(results, (r) => r.ms),
@@ -100,9 +101,9 @@ async function runPass(pass: Pass): Promise<PassResult> {
   };
 }
 
-async function runRepeat(): Promise<RepeatResult> {
+async function runRepeat(connection: Db): Promise<RepeatResult> {
   const passes: PassResult[] = [];
-  for (const pass of PASSES) passes.push(await runPass(pass));
+  for (const pass of PASSES) passes.push(await runPass(connection, pass));
   return {
     label: "repeat",
     ms: sum(passes, (p) => p.ms),
@@ -146,10 +147,17 @@ async function bench(): Promise<number> {
   const quiet = silenceStdout();
   const warmup: RepeatResult[] = [];
   const timed: RepeatResult[] = [];
+  let connection: Db | null = null;
   try {
-    for (let i = 0; i < WARMUP_REPEATS; i += 1) warmup.push(await runRepeat());
-    for (let i = 0; i < TIMED_REPEATS; i += 1) timed.push(await runRepeat());
+    // One long-lived connection for the whole run, as the bot itself has: the
+    // warmup repeat compiles every statement the scenarios use, so the timed
+    // repeats measure the bot's work and not SQLite's parse of it.
+    connection = openDatabase(":memory:");
+    migrate(connection);
+    for (let i = 0; i < WARMUP_REPEATS; i += 1) warmup.push(await runRepeat(connection));
+    for (let i = 0; i < TIMED_REPEATS; i += 1) timed.push(await runRepeat(connection));
   } finally {
+    connection?.close();
     quiet();
   }
 

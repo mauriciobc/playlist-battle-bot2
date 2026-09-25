@@ -116,11 +116,39 @@ function videoIds(acct: string): string[] {
 
 // ── harness ─────────────────────────────────────────────────
 
+/**
+ * Empty every user table, leaving the schema (and the connection's compiled
+ * statements and page cache) in place. Foreign keys are suspended for the
+ * duration: rows are dropped table by table, not in dependency order. The
+ * notification cursor is seeded by the migration as a row, so it is reset
+ * rather than removed.
+ */
+function wipe(db: Db): void {
+  const tables = db
+    .prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         AND name NOT IN ('schema_migrations', 'cursor')`,
+    )
+    .all() as { name: string }[];
+  db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      for (const { name } of tables) db.prepare(`DELETE FROM "${name}"`).run();
+      db.prepare("UPDATE cursor SET last_notification_id = '' WHERE id = 1").run();
+    })();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
+}
+
 export class Harness {
   readonly db: Db;
   readonly checks: Check[] = [];
   gameId: string | null = null;
 
+  /** False when the harness borrowed a connection and must not close it. */
+  private readonly ownsDb: boolean;
   private readonly deps: HandlerDeps;
   private readonly schedDeps: SchedulerDeps;
   private readonly posts: ConsolePost[] = [];
@@ -142,14 +170,25 @@ export class Harness {
   private postSeq = 0;
   private voteCursor = 0;
 
+  /**
+   * A scenario needs a database with no trace of the previous one. Creating a
+   * fresh `:memory:` connection per scenario is one way; the benchmark passes a
+   * shared `connection` instead, because a real bot runs one long-lived
+   * connection — SQLite would otherwise recompile every statement and start
+   * with a cold page cache, which is a property of the harness, not the bot.
+   * Wiping the tables gives the same clean slate on a warm connection.
+   */
   constructor(
     private readonly votes: Votes,
     seed: number,
     private readonly expectedStatuses: string[],
+    connection?: Db,
   ) {
     this.rng = mulberry32(seed);
-    this.db = openDatabase(":memory:");
-    migrate(this.db);
+    this.ownsDb = connection === undefined;
+    this.db = connection ?? openDatabase(":memory:");
+    if (this.ownsDb) migrate(this.db);
+    else wipe(this.db);
 
     const get = async (path: string) => {
       if (path.startsWith("/api/v1/notifications")) return this.queue.splice(0);
@@ -234,6 +273,11 @@ export class Harness {
       },
     };
     this.schedDeps = { handler: this.deps };
+  }
+
+  /** Close the harness's own connection; a borrowed one stays open. */
+  close(): void {
+    if (this.ownsDb) this.db.close();
   }
 
   // ── driving (every action reconciles: one can cascade through the finale) ──
@@ -883,7 +927,7 @@ async function main(): Promise<void> {
     h.reconcile();
     failed += h.finish(scenario.label);
     total += h.checks.length;
-    h.db.close();
+    h.close();
   }
 
   console.log(failed === 0 ? `E2E PASSED (${total} checks)` : `E2E FAILED (${failed} of ${total} checks failed)`);
