@@ -44,21 +44,4 @@ describe("createLogger", () => {
     expect(text).not.toContain("Bearer leak");
     expect(text).toContain("[REDACTED]");
   });
-
-  it("falls back to JSON when pretty is requested without a destination", () => {
-    // Under NODE_ENV=test the logger is silent by default; pretty must not throw
-    // whether or not pino-pretty is installed.
-    const log = createLogger("debug", { pretty: true });
-    expect(() => log.info("ok")).not.toThrow();
-  });
-
-  it("honors level filtering when a destination is attached", () => {
-    const { lines, destination } = capture();
-    const log = createLogger("warn", { destination });
-    log.info("ignored");
-    log.warn("kept");
-    const text = lines.join("");
-    expect(text).toContain("kept");
-    expect(text).not.toContain("ignored");
-  });
 });

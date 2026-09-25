@@ -1,8 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import {
-  MockMastodonServer,
-  type MockMastodonOptions,
-} from "../test/integration/mock-mastodon.js";
+import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import { AUTH, jsonOf, postJson, type Json } from "../test/integration/mock-kit.js";
 
 /**
  * The bot only ever touches six routes. These tests pin the contract of
@@ -21,12 +19,15 @@ import {
  * are what keep it honest.
  */
 
-async function start(overrides: Partial<MockMastodonOptions> = {}) {
+/**
+ * The bot and the player share a username on different instances, so a bare
+ * lookup has to pick the local account, not merely any "mauriciobc".
+ */
+async function start() {
   const server = new MockMastodonServer({
     botAcct: "mauriciobc@mock.social",
     hostAcct: "saiugol@mock.social",
     playerAcct: "mauriciobc@ursal.zone",
-    ...overrides,
   });
   await server.start();
   return server;
@@ -34,14 +35,6 @@ async function start(overrides: Partial<MockMastodonOptions> = {}) {
 
 function url(server: MockMastodonServer, path: string): string {
   return `${server.baseUrl}${path}`;
-}
-
-const AUTH = { Authorization: "Bearer mock-token" };
-
-/** res.json() is `unknown` under strict mode; these narrow it. */
-type Json = Record<string, unknown>;
-async function jsonOf(res: Response): Promise<Json> {
-  return (await res.json()) as Json;
 }
 
 /** Poll body with its options narrowed to what the tests assert on. */
@@ -99,7 +92,7 @@ describe("MockMastodon: notifications (REST::NotificationSerializer)", () => {
     const res = await fetch(url(server, "/api/v1/notifications?limit=10"), {
       headers: AUTH,
     });
-    const body = (await res.json()) as Array<Record<string, unknown>>;
+    const body = (await res.json()) as Json[];
     const n = body.find((x) => x.id === id);
     if (n === undefined) throw new Error("notification not returned");
     // attributes :id, :type, :created_at, :group_key are unconditional.
@@ -111,7 +104,7 @@ describe("MockMastodon: notifications (REST::NotificationSerializer)", () => {
   });
 
   it("returns newest-first and a Link header when more remain", async () => {
-    const a = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+    server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
     const b = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
     const res = await fetch(url(server, "/api/v1/notifications?limit=1"), {
       headers: AUTH,
@@ -132,15 +125,32 @@ describe("MockMastodon: notifications (REST::NotificationSerializer)", () => {
     expect(maxId).toBe(b);
   });
 
-  it("honours since_id", async () => {
+  it("honours since_id, so a poll loop does not replay old notifications", async () => {
     const a = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
-    server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+    const b = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
     const res = await fetch(
       url(server, `/api/v1/notifications?since_id=${a}`),
       { headers: AUTH },
     );
     const body = (await res.json()) as Array<{ id: string }>;
-    expect(body.some((n) => n.id === a)).toBe(false);
+    expect(body.map((n) => n.id)).toEqual([b]);
+  });
+
+  it("pages forward from min_id, oldest first, with a rel=prev link", async () => {
+    const a = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+    const b = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+    const c = server.pushNotification({ type: "mention", fromAcct: "saiugol@mock.social" });
+
+    const res = await fetch(url(server, `/api/v1/notifications?min_id=${a}&limit=1`), { headers: AUTH });
+    const body = (await res.json()) as Array<{ id: string }>;
+    expect(body.map((n) => n.id)).toEqual([b]);
+    const link = res.headers.get("Link");
+    expect(link).toContain('rel="prev"');
+    expect(link).toContain(`min_id=${b}`);
+
+    const last = await fetch(url(server, `/api/v1/notifications?min_id=${c}`), { headers: AUTH });
+    expect(await last.json()).toEqual([]);
+    expect(last.headers.get("Link")).toBeNull();
   });
 });
 
@@ -150,14 +160,12 @@ describe("MockMastodon: statuses (REST::StatusSerializer)", () => {
     server = await start();
   });
 
+  const postStatus = (body: Json) => postJson(server, "/api/v1/statuses", body);
+
   it("creates a status and serializes the poll association", async () => {
-    const res = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "poll time",
-        poll: { options: ["left", "right"], expires_in: 300 },
-      }),
+    const res = await postStatus({
+      status: "poll time",
+      poll: { options: ["left", "right"], expires_in: 300 },
     });
     expect(res.status).toBe(200);
     const body = await jsonOf(res);
@@ -174,13 +182,9 @@ describe("MockMastodon: statuses (REST::StatusSerializer)", () => {
   });
 
   it("rejects a poll shorter than MIN_EXPIRATION (5.minutes) with 422", async () => {
-    const res = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "too short",
-        poll: { options: ["a", "b"], expires_in: 30 },
-      }),
+    const res = await postStatus({
+      status: "too short",
+      poll: { options: ["a", "b"], expires_in: 30 },
     });
     // PollExpirationValidator: MIN_EXPIRATION = 5.minutes
     expect(res.status).toBe(422);
@@ -189,46 +193,29 @@ describe("MockMastodon: statuses (REST::StatusSerializer)", () => {
   });
 
   it("accepts exactly 300 seconds", async () => {
-    const res = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "exactly the floor",
-        poll: { options: ["a", "b"], expires_in: 300 },
-      }),
+    const res = await postStatus({
+      status: "exactly the floor",
+      poll: { options: ["a", "b"], expires_in: 300 },
     });
     expect(res.status).toBe(200);
   });
 
   it("rejects more than MAX_OPTIONS (4) and duplicate options", async () => {
-    const five = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "five",
-        poll: { options: ["a", "b", "c", "d", "e"], expires_in: 300 },
-      }),
+    const five = await postStatus({
+      status: "five",
+      poll: { options: ["a", "b", "c", "d", "e"], expires_in: 300 },
     });
     expect(five.status).toBe(422);
 
-    const dupes = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "dupes",
-        poll: { options: ["a", "a"], expires_in: 300 },
-      }),
+    const dupes = await postStatus({
+      status: "dupes",
+      poll: { options: ["a", "a"], expires_in: 300 },
     });
     expect(dupes.status).toBe(422);
   });
 
   it("deletes a status and 404s an unknown one", async () => {
-    const created = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "temporary" }),
-    });
-    const { id } = await jsonOf(created);
+    const { id } = await jsonOf(await postStatus({ status: "temporary" }));
     const del = await fetch(url(server, `/api/v1/statuses/${id}`), {
       method: "DELETE",
       headers: AUTH,
@@ -246,16 +233,14 @@ describe("MockMastodon: polls (REST::PollSerializer + controllers)", () => {
   let pollId: string;
   beforeEach(async () => {
     server = await start();
-    const res = await fetch(url(server, "/api/v1/statuses"), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "round 1",
-        poll: { options: ["alice", "bob"], expires_in: 300 },
-      }),
+    const res = await postJson(server, "/api/v1/statuses", {
+      status: "round 1",
+      poll: { options: ["alice", "bob"], expires_in: 300 },
     });
     pollId = String(((await jsonOf(res)).poll as Json).id);
   });
+
+  const vote = (body: Json) => postJson(server, `/api/v1/polls/${pollId}/votes`, body);
 
   it("serves GET /api/v1/polls/:id with include_results semantics", async () => {
     const res = await fetch(url(server, `/api/v1/polls/${pollId}`), {
@@ -272,11 +257,7 @@ describe("MockMastodon: polls (REST::PollSerializer + controllers)", () => {
 
   it("accepts a vote via plural choices and tallies it", async () => {
     // Api::V1::Polls::VotesController#vote_params: params.require(:choices)
-    const res = await fetch(url(server, `/api/v1/polls/${pollId}/votes`), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({ choices: [0] }),
-    });
+    const res = await vote({ choices: [0] });
     expect(res.status).toBe(200);
     const body = await pollOf(res);
     expect(body.options[0]?.votes_count).toBe(1);
@@ -285,30 +266,20 @@ describe("MockMastodon: polls (REST::PollSerializer + controllers)", () => {
   });
 
   it("rejects a vote without choices (params.require(:choices))", async () => {
-    const res = await fetch(url(server, `/api/v1/polls/${pollId}/votes`), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({ choice: 0 }),
-    });
-    // params.require(:choices) raises ParameterMissing -> 400
+    // A singular `choice` is not a tolerated alias: params.require(:choices)
+    // raises ParameterMissing -> 400, as polls/votes_spec.rb expects.
+    const res = await vote({ choice: 0 });
     expect(res.status).toBe(400);
+    expect(res.headers.get("content-type")).toContain("application/json");
   });
 
   it("rejects an out-of-range choice", async () => {
-    const res = await fetch(url(server, `/api/v1/polls/${pollId}/votes`), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({ choices: [7] }),
-    });
+    const res = await vote({ choices: [7] });
     expect(res.status).toBe(422);
   });
 
   it("serializes voted and own_votes because the request is authenticated", async () => {
-    await fetch(url(server, `/api/v1/polls/${pollId}/votes`), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({ choices: [0] }),
-    });
+    await vote({ choices: [0] });
     const res = await fetch(url(server, `/api/v1/polls/${pollId}`), {
       headers: AUTH,
     });
@@ -321,11 +292,7 @@ describe("MockMastodon: polls (REST::PollSerializer + controllers)", () => {
   it("marks the poll expired and exposes tallies once expires_at passes", async () => {
     // Vote first, so there is a tally to reveal. Poll#show_totals_now? is
     // `expired? || !hide_totals?` - expiry is what un-hides the counts.
-    await fetch(url(server, `/api/v1/polls/${pollId}/votes`), {
-      method: "POST",
-      headers: { ...AUTH, "Content-Type": "application/json" },
-      body: JSON.stringify({ choices: [0] }),
-    });
+    await vote({ choices: [0] });
     server.expirePoll(pollId);
     const res = await fetch(url(server, `/api/v1/polls/${pollId}`), {
       headers: AUTH,

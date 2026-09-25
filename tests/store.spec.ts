@@ -1,122 +1,100 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { openDatabase, migrate, type Db } from "../src/db/index.js";
+import { describe, expect, it } from "vitest";
 import { TERMINAL_STATUSES } from "../src/game/types.js";
 import {
-  lastHostedCreation,
-  openGamesForAccount,
+  deferUntilNotifications,
+  recordNotificationFailure,
   releasePendingNotificationClaims,
-} from "../src/game/store.js";
+} from "../src/db/notifications.js";
+import { lastHostedCreation, openGamesForAccount } from "../src/db/games.js";
+import { NOW, seedGame, seedPlayer, useHarness } from "./support.js";
 
-let dir: string;
-let db: Db;
+const h = useHarness();
 
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "pb-store-"));
-  db = openDatabase(join(dir, "test.db"));
-  migrate(db);
-});
-
-afterEach(() => {
-  db.close();
-  rmSync(dir, { recursive: true, force: true });
-});
-
-function seedGame(opts: {
-  id: string;
-  status?: string;
-  hostAccountId?: string;
-  createdAt?: string;
-}): void {
-  const at = opts.createdAt ?? "2026-09-21T12:00:00.000Z";
-  db.prepare(
-    `INSERT INTO games (id, status, theme, playlist_length, host_account_id, poll_duration_sec,
-      thread_root_id, current_round, pot, created_at, updated_at)
-     VALUES (?, ?, 'T', 8, ?, 86400, 'root-1', 0, 0, ?, ?)`,
-  ).run(opts.id, opts.status ?? "ROUND", opts.hostAccountId ?? "a", at, at);
+/** A game hosted (and joined) by `host`, plus any challengers. */
+function hosted(id: string, host: string, o: { status?: string; createdAt?: string; challengers?: string[] } = {}) {
+  seedGame(h.db, { id, host, status: o.status ?? "ROUND", createdAt: o.createdAt ?? NOW });
+  for (const accountId of [host, ...(o.challengers ?? [])]) seedPlayer(h.db, id, accountId);
 }
 
-function seedParticipant(gameId: string, accountId: string, role: "host" | "challenger" = "challenger"): void {
-  db.prepare(
-    `INSERT INTO players (game_id, account_id, acct, role, invite_status, points) VALUES (?, ?, ?, ?, 'accepted', 0)`,
-  ).run(gameId, accountId, accountId, role);
-}
+const openIds = (accountId: string) => openGamesForAccount(h.db, accountId).map((g) => g.id).sort();
 
 describe("openGamesForAccount", () => {
   it("counts games the account joined as a challenger, not only games it hosts", () => {
-    seedGame({ id: "hosted-by-a", hostAccountId: "a" });
-    seedParticipant("hosted-by-a", "a", "host");
+    hosted("hosted-by-a", "a");
+    hosted("joined-by-a", "b", { challengers: ["a"] });
+    hosted("unrelated", "b");
 
-    seedGame({ id: "joined-by-a", hostAccountId: "b" });
-    seedParticipant("joined-by-a", "b", "host");
-    seedParticipant("joined-by-a", "a");
-
-    seedGame({ id: "unrelated", hostAccountId: "b" });
-    seedParticipant("unrelated", "b", "host");
-
-    expect(openGamesForAccount(db, "a").map((g) => g.id).sort()).toEqual(["hosted-by-a", "joined-by-a"]);
-    expect(openGamesForAccount(db, "b").map((g) => g.id).sort()).toEqual(["joined-by-a", "unrelated"]);
+    expect(openIds("a")).toEqual(["hosted-by-a", "joined-by-a"]);
+    expect(openIds("b")).toEqual(["joined-by-a", "unrelated"]);
+    expect(openIds("c")).toEqual([]);
   });
 
   it("excludes games in every terminal status", () => {
-    seedGame({ id: "still-open", status: "COLLECTING" });
-    seedParticipant("still-open", "a", "host");
-    for (const status of TERMINAL_STATUSES) {
-      seedGame({ id: `closed-${status}`, status });
-      seedParticipant(`closed-${status}`, "a", "host");
-    }
+    hosted("still-open", "a", { status: "COLLECTING" });
+    for (const status of TERMINAL_STATUSES) hosted(`closed-${status}`, "a", { status });
 
-    expect(openGamesForAccount(db, "a").map((g) => g.id)).toEqual(["still-open"]);
-  });
-
-  it("returns nothing for an account in no games", () => {
-    seedGame({ id: "someone-elses", hostAccountId: "b" });
-    seedParticipant("someone-elses", "b", "host");
-
-    expect(openGamesForAccount(db, "a")).toEqual([]);
+    expect(openIds("a")).toEqual(["still-open"]);
   });
 });
 
 describe("lastHostedCreation", () => {
-  it("returns the most recent game the account hosted", () => {
-    seedGame({ id: "g-early", hostAccountId: "a", createdAt: "2026-01-01T00:00:00.000Z" });
-    seedGame({ id: "g-late", hostAccountId: "a", createdAt: "2026-06-01T00:00:00.000Z" });
+  it("returns the most recent game the account hosted, ignoring games it only joined", () => {
+    hosted("g-early", "a", { createdAt: "2026-01-01T00:00:00.000Z" });
+    hosted("g-late", "a", { createdAt: "2026-06-01T00:00:00.000Z" });
+    hosted("joined", "b", { createdAt: "2026-12-01T00:00:00.000Z", challengers: ["a"] });
 
-    expect(lastHostedCreation(db, "a")).toBe("2026-06-01T00:00:00.000Z");
-  });
-
-  it("ignores games the account only joined and games hosted by others", () => {
-    seedGame({ id: "hosted", hostAccountId: "a", createdAt: "2026-01-01T00:00:00.000Z" });
-    seedGame({ id: "joined", hostAccountId: "b", createdAt: "2026-12-01T00:00:00.000Z" });
-    seedParticipant("joined", "a");
-
-    expect(lastHostedCreation(db, "a")).toBe("2026-01-01T00:00:00.000Z");
+    expect(lastHostedCreation(h.db, "a")).toBe("2026-06-01T00:00:00.000Z");
   });
 
   it("returns null when the account has hosted nothing", () => {
-    seedGame({ id: "joined", hostAccountId: "b" });
-    seedParticipant("joined", "a");
+    hosted("joined", "b", { challengers: ["a"] });
 
-    expect(lastHostedCreation(db, "a")).toBeNull();
+    expect(lastHostedCreation(h.db, "a")).toBeNull();
   });
 });
 
 describe("releasePendingNotificationClaims", () => {
   it("drops mid-flight claims but keeps completed notifications", () => {
-    const insert = db.prepare(
-      "INSERT INTO processed_notifications (notification_id, processed_at) VALUES (?, ?)",
-    );
+    const insert = h.db.prepare("INSERT INTO processed_notifications (notification_id, processed_at) VALUES (?, ?)");
     insert.run("in-flight", ""); // crashed between claim and completion
     insert.run("done-1", "2026-09-21T12:00:00.000Z");
     insert.run("done-2", "2026-09-21T12:00:01.000Z");
 
-    releasePendingNotificationClaims(db);
+    releasePendingNotificationClaims(h.db);
 
-    const remaining = db
-      .prepare("SELECT notification_id FROM processed_notifications ORDER BY notification_id")
-      .all() as { notification_id: string }[];
-    expect(remaining.map((r) => r.notification_id)).toEqual(["done-1", "done-2"]);
+    expect(
+      h.db.prepare("SELECT notification_id FROM processed_notifications ORDER BY notification_id").all(),
+    ).toEqual([{ notification_id: "done-1" }, { notification_id: "done-2" }]);
+  });
+});
+
+/**
+ * next_attempt_at was once written on every rate-limited failure and never
+ * read: the poller re-ran the same notification each tick, and every rejected
+ * POST refreshed the very window being waited out.
+ */
+describe("deferUntilNotifications", () => {
+  it("holds a rate-limited notification until its reset, then releases it", () => {
+    recordNotificationFailure(h.db, "limited", {
+      attempts: 1,
+      lastError: "rate limit exhausted",
+      nextAttemptAt: "2026-09-24T14:05:00.000Z",
+      deadLetteredAt: null,
+    });
+
+    expect([...deferUntilNotifications(h.db, new Date("2026-09-24T14:00:00.000Z"))]).toEqual(["limited"]);
+    expect([...deferUntilNotifications(h.db, new Date("2026-09-24T14:06:00.000Z"))]).toEqual([]);
+  });
+
+  it("never defers dead-lettered or unscheduled failures", () => {
+    recordNotificationFailure(h.db, "dead", {
+      attempts: 3,
+      lastError: "poison",
+      nextAttemptAt: "2099-01-01T00:00:00.000Z",
+      deadLetteredAt: "2026-09-24T14:00:00.000Z",
+    });
+    recordNotificationFailure(h.db, "plain", { attempts: 1, lastError: "boom", nextAttemptAt: null, deadLetteredAt: null });
+
+    expect(deferUntilNotifications(h.db, new Date("2026-09-24T14:00:00.000Z")).size).toBe(0);
   });
 });

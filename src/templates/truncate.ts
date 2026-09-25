@@ -1,13 +1,13 @@
 /** PRD §8: all generated content fits within 500 characters. */
 
 export const POST_LIMIT = 500;
-export const POLL_OPTION_LIMIT = 25;
+const POLL_OPTION_LIMIT = 25;
 
-/** Truncate a title to max chars (counted as UTF-16 code units) with ellipsis. */
-export function truncateTitle(title: string, max: number = POLL_OPTION_LIMIT): string {
-  if (title.length <= max) return title;
+/** Truncate to max chars (counted as UTF-16 code units) with an ellipsis. */
+export function truncate(text: string, max: number = POST_LIMIT): string {
+  if (text.length <= max) return text;
   if (max <= 1) return "…".slice(0, max);
-  return `${title.slice(0, max - 1)}…`;
+  return `${text.slice(0, max - 1)}…`;
 }
 
 /**
@@ -16,11 +16,11 @@ export function truncateTitle(title: string, max: number = POLL_OPTION_LIMIT): s
  */
 export function abbreviatePollOption(playerName: string, title: string): string {
   const name = playerName.trim() || "?";
-  if (name.length >= POLL_OPTION_LIMIT) return truncateTitle(name, POLL_OPTION_LIMIT);
+  if (name.length >= POLL_OPTION_LIMIT) return truncate(name, POLL_OPTION_LIMIT);
   const sep = ": ";
   const budget = POLL_OPTION_LIMIT - name.length - sep.length;
-  if (budget <= 1) return truncateTitle(name, POLL_OPTION_LIMIT);
-  const tune = truncateTitle(title.trim() || "—", budget);
+  if (budget <= 1) return truncate(name, POLL_OPTION_LIMIT);
+  const tune = truncate(title.trim() || "—", budget);
   return `${name}${sep}${tune}`;
 }
 
@@ -44,7 +44,7 @@ export function dedupePollOptions(options: string[]): string[] {
       const candidate =
         base.length + suffix.length <= POLL_OPTION_LIMIT
           ? `${base}${suffix}`
-          : `${truncateTitle(base, POLL_OPTION_LIMIT - suffix.length)}${suffix}`;
+          : `${truncate(base, POLL_OPTION_LIMIT - suffix.length)}${suffix}`;
       if (!seen.has(candidate)) {
         seen.add(candidate);
         return candidate;
@@ -68,13 +68,6 @@ export function sanitizeTitleForPost(title: string): string {
   return title.split("://").join(":" + ZWSP + "//");
 }
 
-export function truncatePost(text: string, max: number = POST_LIMIT): string {
-  if (max <= 0) return "";
-  if (text.length <= max) return text;
-  if (max === 1) return "…";
-  return `${text.slice(0, max - 1)}…`;
-}
-
 export function truncatePostWithSuffix(
   prefix: string,
   suffix: string,
@@ -82,11 +75,11 @@ export function truncatePostWithSuffix(
 ): string {
   const separator = "\n";
   const available = max - suffix.length - separator.length;
-  if (available <= 0) return truncatePost(suffix, max);
-  return `${truncatePost(prefix, available)}${separator}${suffix}`;
+  if (available <= 0) return truncate(suffix, max);
+  return `${truncate(prefix, available)}${separator}${suffix}`;
 }
 
-export class PostTooLongError extends Error {
+class PostTooLongError extends Error {
   override readonly name = "PostTooLongError";
   readonly length: number;
 

@@ -33,11 +33,14 @@ npm run lint
 npm test
 npm run e2e:console
 npm run e2e:console -- --random --seed=42
+npm run bench:sim
 npm run build
 npm start
 ```
 
 `npm start` runs the compiled `dist/index.js`, so run `npm run build` first. `npm run dev` starts the TypeScript watcher and also requires environment variables to be present in the process environment.
+
+`npm run bench:sim` replays the same eight scenarios as `npm run e2e:console` in-process (scripted votes plus three fixed RNG seeds, five timed repeats) and prints how long the fixed workload takes. It talks to nothing: the Mastodon client is the console adapter and YouTube's queue endpoint is stubbed, so the number is comparable across machines and runs.
 
 ## Live debugging
 

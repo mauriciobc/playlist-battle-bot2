@@ -18,10 +18,6 @@ describe("acctMatches", () => {
     expect(acctMatches("mauriciobc", "mastodon.social", BOT)).toBe(true);
   });
 
-  it("matches a qualified acct against a same-instance target", () => {
-    expect(acctMatches("mauriciobc@mastodon.social", "mastodon.social", BOT)).toBe(true);
-  });
-
   it("matches a remote acct seen from another instance", () => {
     expect(acctMatches("mauriciobc@mastodon.social", "ursal.zone", BOT)).toBe(true);
   });

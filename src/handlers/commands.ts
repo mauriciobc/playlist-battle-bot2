@@ -5,6 +5,7 @@
  */
 
 import { m } from "../i18n/index.js";
+import { isValidPlaylistLength, MAX_CHALLENGERS } from "../game/types.js";
 
 export type CreateCommand =
   | {
@@ -14,18 +15,33 @@ export type CreateCommand =
     }
   | { error: string };
 
-const MENTION_RE = /@([A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?)/g;
+/** `user` or `user@instance`. */
+const HANDLE = "[A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?";
+const MENTION_RE = new RegExp(`@(${HANDLE})`, "g");
+const LEADING_MENTIONS_RE = new RegExp(`^\\s*(@${HANDLE}\\s*)+`);
+/** A challenger handle with an optional leading "@". */
+const CHALLENGER_RE = new RegExp(`(^|\\s)@?(${HANDLE})`, "g");
 
 function stripLeadingMentions(text: string): string {
-  return text.replace(/^\s*(@[A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?\s*)+/, "");
+  return text.replace(LEADING_MENTIONS_RE, "");
 }
 
 function extractMentions(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(MENTION_RE)) {
-    if (m[1]) out.push(m[1]);
+  for (const match of text.matchAll(MENTION_RE)) {
+    if (match[1]) out.push(match[1]);
   }
   return out;
+}
+
+/** Local part of a handle (`alice` for `alice@other.social`). */
+function localPart(handle: string): string {
+  return handle.split("@")[0]!;
+}
+
+function mentionsBot(text: string, botAcct: string): boolean {
+  const bot = botAcct.toLowerCase();
+  return extractMentions(text).some((mention) => localPart(mention).toLowerCase() === bot);
 }
 
 /**
@@ -38,11 +54,8 @@ function extractMentions(text: string): string[] {
 function extractChallengers(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  // Match an optional @, then user, then an optional @host group.
-  for (const m of text.matchAll(
-    /(^|\s)@?([A-Za-z0-9_]+(?:@[A-Za-z0-9.-]+)?)/g,
-  )) {
-    const handle = m[2];
+  for (const match of text.matchAll(CHALLENGER_RE)) {
+    const handle = match[2];
     if (!handle) continue;
     const key = handle.toLowerCase();
     if (seen.has(key)) continue;
@@ -52,9 +65,34 @@ function extractChallengers(text: string): string[] {
   return out;
 }
 
-/** Local part of a handle (`alice` for `alice@other.social`). */
-function localPart(handle: string): string {
-  return handle.split("@")[0]!;
+/**
+ * Challenger handles minus the bot itself: bare `@bot` and `@bot@<bot's
+ * instance>` are dropped, while `@bot@other.instance` (a different person with
+ * the same local part) stays.
+ */
+function challengersExceptBot(text: string, botAcct: string, instanceDomain?: string): string[] {
+  const bot = botAcct.toLowerCase();
+  const botQualified = instanceDomain ? `${bot}@${instanceDomain.toLowerCase()}` : bot;
+  return extractChallengers(text).filter((handle) => {
+    const lower = handle.toLowerCase();
+    return lower !== bot && lower !== botQualified;
+  });
+}
+
+/**
+ * Split `<theme> <length> <challengers…>` into the theme and the text after it.
+ * The theme is quoted, or else everything before the first standalone
+ * playlist-length integer.
+ */
+function splitTheme(rest: string): { theme: string; remainder: string } | null {
+  const quoted = rest.match(/^(["'])(.*?)\1\s*(.*)$/s);
+  if (quoted) return { theme: quoted[2]!.trim(), remainder: quoted[3]!.trim() };
+
+  // Lookahead ensures "90s" in a theme doesn't match as the length.
+  const lengthMatch = rest.match(/(?:^|\s)(\d{1,2})(?=\s|$)/);
+  if (!lengthMatch || lengthMatch.index === undefined) return null;
+  const lengthStart = lengthMatch.index + lengthMatch[0].search(/\d/);
+  return { theme: rest.slice(0, lengthStart).trim(), remainder: rest.slice(lengthStart).trim() };
 }
 
 /**
@@ -63,82 +101,35 @@ function localPart(handle: string): string {
  * or null when this text is not a create command for this bot.
  */
 export function parseCreateCommand(text: string, botAcct: string, instanceDomain?: string): CreateCommand | null {
-  const mentions = extractMentions(text);
-  if (!mentions.some((m) => localPart(m).toLowerCase() === botAcct.toLowerCase())) return null;
+  if (!mentionsBot(text, botAcct)) return null;
+  const command = stripLeadingMentions(text).trim();
+  if (!/^newgame\b/i.test(command)) return null;
 
-  const withoutMentions = stripLeadingMentions(text);
-  const cleaned = withoutMentions.trim();
+  const split = splitTheme(command.replace(/^newgame\b/i, "").trim());
+  if (!split) return { error: m().cmdUsage() };
+  if (!split.theme) return { error: m().cmdThemeRequired() };
 
-  if (!/^newgame\b/i.test(cleaned)) return null;
+  const lengthToken = split.remainder.match(/^(\d{1,2})\s*/);
+  if (!lengthToken) return { error: m().cmdLengthRequired() };
+  const playlistLength = Number(lengthToken[1]);
+  if (!isValidPlaylistLength(playlistLength)) return { error: m().cmdLengthRange() };
 
-  const rest = cleaned.replace(/^newgame\b/i, "").trim();
-
-  // Theme: quoted or unquoted-before-length
-  let theme: string;
-  let remainder: string;
-
-  const quoted = rest.match(/^(["'])(.*?)\1\s*(.*)$/s);
-  if (quoted) {
-    theme = quoted[2]!.trim();
-    remainder = quoted[3]!.trim();
-  } else {
-    // Unquoted: theme is everything before the first standalone playlist-length integer.
-    // Lookahead ensures "90s" in a theme doesn't match as length.
-    const lenMatch = rest.match(/(?:^|\s)(\d{1,2})(?=\s|$)/);
-    if (!lenMatch || lenMatch.index === undefined) {
-      return { error: m().cmdUsage() };
-    }
-    const absNumStart = lenMatch.index + lenMatch[0].search(/\d/);
-    theme = rest.slice(0, absNumStart).trim();
-    remainder = rest.slice(absNumStart).trim();
-  }
-
-  if (!theme) {
-    return { error: m().cmdThemeRequired() };
-  }
-
-  const lenTok = remainder.match(/^(\d{1,2})\s*/);
-  if (!lenTok) {
-    return { error: m().cmdLengthRequired() };
-  }
-  const playlistLength = Number(lenTok[1]);
-  const afterLen = remainder.slice(lenTok[0].length).trim();
-
-  if (playlistLength < 8 || playlistLength > 12) {
-    return { error: m().cmdLengthRange() };
-  }
-
-  const botFull = instanceDomain
-    ? botAcct.toLowerCase() + "@" + instanceDomain.toLowerCase()
-    : botAcct.toLowerCase();
-  const challengers = extractChallengers(afterLen).filter(
-    (c) => {
-      const mentionLower = c.toLowerCase();
-      // Filter the bot itself: bare @bot and @bot@bot's-instance
-      // but allow @bot@other.instance (different person, same local part)
-      return mentionLower !== botAcct.toLowerCase() && mentionLower !== botFull;
-    },
+  const challengers = challengersExceptBot(
+    split.remainder.slice(lengthToken[0].length).trim(),
+    botAcct,
+    instanceDomain,
   );
-
-  if (challengers.length === 0) {
-    return { error: m().cmdTagChallenger() };
-  }
-  if (challengers.length > 3) {
-    return { error: m().cmdMaxChallengers() };
-  }
+  if (challengers.length === 0) return { error: m().cmdTagChallenger() };
+  if (challengers.length > MAX_CHALLENGERS) return { error: m().cmdMaxChallengers() };
   const unique = new Set(challengers.map((c) => c.toLowerCase()));
-  if (unique.size !== challengers.length) {
-    return { error: m().cmdDuplicateChallengers() };
-  }
+  if (unique.size !== challengers.length) return { error: m().cmdDuplicateChallengers() };
 
-  return { theme, playlistLength, challengers };
+  return { theme: split.theme, playlistLength, challengers };
 }
 
 export function parseStatusCommand(text: string, botAcct: string): boolean {
-  const mentions = extractMentions(text);
-  if (!mentions.some((m) => localPart(m).toLowerCase() === botAcct.toLowerCase())) return false;
-  const rest = stripLeadingMentions(text).trim();
-  return /^(status|help)\b/i.test(rest);
+  if (!mentionsBot(text, botAcct)) return false;
+  return /^(status|help)\b/i.test(stripLeadingMentions(text).trim());
 }
 
 export type DmReply =
@@ -173,12 +164,9 @@ export function parseDmReply(text: string): DmReply {
     return { kind: "replace", position: Number(replace[1]), url: replace[2]! };
   }
 
+  // Any URL counts here; the submission handler decides whether it is a YouTube video.
   const urls = t.match(URL_RE) ?? [];
-  if (urls.length > 0) {
-    // Keep only youtube-ish candidates; validation happens downstream
-    return { kind: "links", urls };
-  }
-  return { kind: "unknown" };
+  return urls.length > 0 ? { kind: "links", urls } : { kind: "unknown" };
 }
 
 /** Remove HTML tags and decode the few entities Mastodon uses in status content.

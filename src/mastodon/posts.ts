@@ -1,7 +1,15 @@
 import type { MastodonClient, RequestOptions } from "./client.js";
-import type { Game, Player, Tune } from "../game/types.js";
-import { abbreviatePollOption, assertPostLength, dedupePollOptions, sanitizeTitleForPost, truncatePost, truncatePostWithSuffix } from "../templates/truncate.js";
+import type { Game, Player, PotSplit, Tally, Tune } from "../game/types.js";
+import {
+  abbreviatePollOption,
+  assertPostLength,
+  dedupePollOptions,
+  sanitizeTitleForPost,
+  truncate,
+  truncatePostWithSuffix,
+} from "../templates/truncate.js";
 import { m } from "../i18n/index.js";
+import { byStanding, totalVotes } from "../game/scoring.js";
 
 /**
  * Outbound Mastodon posting: round threads, polls, resolution, finale, side effects.
@@ -18,11 +26,12 @@ export type PostRoundResult = {
 
 async function postStatus(
   client: MastodonClient,
-  body: { status: string; in_reply_to_id?: string; visibility?: string; poll?: unknown },
+  body: { status: string; in_reply_to_id?: string; poll?: unknown },
   options: RequestOptions = {},
 ): Promise<{ id: string; poll?: { id: string; expires_at?: string } }> {
   assertPostLength(body.status);
-  const payload: Record<string, unknown> = { status: body.status, visibility: body.visibility ?? "public" };
+  // Key order is part of the outbox ledger's idempotency check: keep it stable.
+  const payload: Record<string, unknown> = { status: body.status, visibility: "public" };
   if (body.in_reply_to_id) payload.in_reply_to_id = body.in_reply_to_id;
   if (body.poll) payload.poll = body.poll;
   return client.post<{ id: string; poll?: { id: string; expires_at?: string } }>(
@@ -36,9 +45,9 @@ function acctOf(players: Player[], accountId: string): string {
   return players.find((p) => p.accountId === accountId)?.acct ?? accountId;
 }
 
-function displayName(players: Player[], accountId: string): string {
-  const p = players.find((x) => x.accountId === accountId);
-  return p?.displayName ?? p?.acct ?? accountId;
+/** `@alice 3 · @bob 1`, in the order given. */
+function standings(players: Player[]): string {
+  return players.map((p) => `@${p.acct} ${p.points}`).join(" · ");
 }
 
 function roundKey(gameId: string, round: number, part: string): string {
@@ -62,11 +71,11 @@ export async function postRound(
 ): Promise<PostRoundResult> {
   const playing = players.filter((p) => roundTunes.some((t) => t.accountId === p.accountId));
 
-  const announceText = truncatePost(m().roundAnnounce(
+  const announceText = truncate(m().roundAnnounce(
     round,
     game.playlistLength,
     game.theme,
-    players.map((p) => `@${p.acct} ${p.points}`).join(" · "),
+    standings(players),
     game.pot,
     playing.map((p) => `@${p.acct}`).join(", "),
   ));
@@ -81,13 +90,10 @@ export async function postRound(
     // Sanitize the displayed title so an embedded URL inside it can't steal
     // Mastodon's preview card (first URL in text wins) from the canonical
     // YouTube link, which is what produces the video embed.
-    const lineWithoutUrl = m().tuneLine(
-      acctOf(players, t.accountId),
-      sanitizeTitleForPost(t.title),
-      "",
+    const text = truncatePostWithSuffix(
+      m().tuneLine(acctOf(players, t.accountId), sanitizeTitleForPost(t.title)),
+      t.canonicalUrl,
     );
-    const prefix = lineWithoutUrl.endsWith("\n") ? lineWithoutUrl.slice(0, -1) : lineWithoutUrl;
-    const text = truncatePostWithSuffix(prefix, t.canonicalUrl);
     const posted = await postStatus(
       client,
       { status: text, in_reply_to_id: prevId },
@@ -103,7 +109,7 @@ export async function postRound(
   const options = dedupePollOptions(
     roundTunes.map((t, i) => {
       optionMap[String(i)] = t.accountId;
-      return abbreviatePollOption(displayName(players, t.accountId), t.title);
+      return abbreviatePollOption(acctOf(players, t.accountId), t.title);
     }),
   );
 
@@ -139,7 +145,7 @@ export type TallyInput = {
   newPot?: number;
   walkover?: boolean;
   /** v1.1 1.3: final-round pot split meta (present only on a split tie). */
-  potSplit?: { total: number; each: number; count: number } | null;
+  potSplit?: PotSplit | null;
 };
 
 export async function postRoundResolution(
@@ -165,19 +171,14 @@ export async function postRoundResolution(
     lines.push(m().resolutionWin(input.round, input.winnerAcct, input.potAwarded));
   }
 
-  const sorted = [...players].sort(
-    (a, b) => b.points - a.points || a.accountId.localeCompare(b.accountId),
-  );
-  lines.push(
-    m().standingsLine(sorted.map((p) => `@${p.acct} ${p.points}`).join(" · ")),
-  );
+  lines.push(m().standingsLine(standings([...players].sort(byStanding))));
   const potAfter = input.newPot ?? game.pot;
   if (input.newPot !== undefined || game.pot > 0 || input.wasTie) {
     lines.push(m().potLine(potAfter));
   }
 
   const posted = await postStatus(client, {
-    status: truncatePost(lines.join("\n")),
+    status: truncate(lines.join("\n")),
     in_reply_to_id: game.threadRootId ?? game.id,
   }, { idempotencyKey: roundKey(game.id, input.round, "result") });
   return posted.id;
@@ -204,14 +205,12 @@ export async function postFinale(
   winningTunes: FinaleTune[],
   opts: {
     duelThreadId: string | null;
-    potSplit: { total: number; each: number; count: number } | null;
+    potSplit: PotSplit | null;
     /** Battle playlist/queue link; null when publishing failed. */
     queueUrl: string | null;
   },
 ): Promise<string> {
-  const ordered = [...players].sort(
-    (a, b) => b.points - a.points || a.accountId.localeCompare(b.accountId),
-  );
+  const ordered = [...players].sort(byStanding);
   const champHandles = champions.map((id) => `@${acctOf(players, id)}`);
 
   const lines: string[] = [];
@@ -221,9 +220,7 @@ export async function postFinale(
     lines.push(m().champion(champHandles[0]!));
   }
   lines.push(m().finaleTheme(game.theme, game.playlistLength));
-  lines.push(
-    m().finaleStandings(ordered.map((p) => `@${p.acct} ${p.points}`).join(" · ")),
-  );
+  lines.push(m().finaleStandings(standings(ordered)));
   if (opts.potSplit && opts.potSplit.total > 0) {
     lines.push(m().finalePotSplit(opts.potSplit.total, opts.potSplit.each, opts.potSplit.count));
   }
@@ -231,29 +228,24 @@ export async function postFinale(
 
   const summary = await postStatus(
     client,
-    { status: truncatePost(lines.join("\n")) },
+    { status: truncate(lines.join("\n")) },
     { idempotencyKey: finaleKey(game.id, "summary") },
   );
 
   // First reply: the whole battle as one link, before the per-round winners.
   if (opts.queueUrl) {
-    const queuePrefix = m().finaleQueue("").trimEnd();
     await postStatus(
       client,
-      { status: truncatePostWithSuffix(queuePrefix, opts.queueUrl), in_reply_to_id: summary.id },
+      { status: truncatePostWithSuffix(m().finaleQueue(), opts.queueUrl), in_reply_to_id: summary.id },
       { idempotencyKey: finaleKey(game.id, "queue") },
     );
   }
 
   for (const [tuneIndex, t] of winningTunes.entries()) {
-    const lineWithoutUrl = m().finaleWinningTune(
-      t.round,
-      acctOf(players, t.accountId),
-      sanitizeTitleForPost(t.title),
-      "",
+    const text = truncatePostWithSuffix(
+      m().finaleWinningTune(t.round, acctOf(players, t.accountId), sanitizeTitleForPost(t.title)),
+      t.canonicalUrl,
     );
-    const prefix = lineWithoutUrl.endsWith("\n") ? lineWithoutUrl.slice(0, -1) : lineWithoutUrl;
-    const text = truncatePostWithSuffix(prefix, t.canonicalUrl);
     await postStatus(
       client,
       { status: text, in_reply_to_id: summary.id },
@@ -295,7 +287,7 @@ export async function tallyPoll(
   client: MastodonClient,
   pollId: string,
   optionMap: Record<string, string>,
-): Promise<{ accountId: string; votes: number }[]> {
+): Promise<Tally[]> {
   const poll = await client.get<{
     expired: boolean;
     options: { title: string; votes_count: number }[];
@@ -307,8 +299,7 @@ export async function tallyPoll(
   if (!Array.isArray(poll.options) || poll.options.length !== Object.keys(optionMap).length) {
     throw new Error("Mastodon poll options do not match the stored round map");
   }
-
-  const tallies: { accountId: string; votes: number }[] = [];
+  const tallies: Tally[] = [];
   poll.options.forEach((opt, idx) => {
     const accountId = optionMap[String(idx)];
     if (!accountId || !Number.isInteger(opt.votes_count) || opt.votes_count < 0) {
@@ -320,7 +311,7 @@ export async function tallyPoll(
 }
 
 export type PollSnapshot = {
-  tallies: { accountId: string; votes: number }[];
+  tallies: Tally[];
   totalVotes: number;
 };
 
@@ -341,19 +332,14 @@ export async function pollSnapshot(
   if (!Array.isArray(poll.options) || poll.options.length !== Object.keys(optionMap).length) {
     return null;
   }
-  if (poll.options.some((o) => o.votes_count === null || o.votes_count === undefined)) {
-    return null;
-  }
 
-  const tallies: { accountId: string; votes: number }[] = [];
-  let totalVotes = 0;
+  const tallies: Tally[] = [];
   for (const [idx, opt] of poll.options.entries()) {
     const votes = opt.votes_count;
     if (votes === null || votes === undefined) return null;
     const accountId = optionMap[String(idx)];
     if (!accountId) return null;
-    totalVotes += votes;
     tallies.push({ accountId, votes });
   }
-  return { tallies, totalVotes };
+  return { tallies, totalVotes: totalVotes(tallies) };
 }

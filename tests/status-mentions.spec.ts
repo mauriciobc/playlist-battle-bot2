@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import type { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import { AUTH, post, startMock, type Json } from "../test/integration/mock-kit.js";
 
 /**
  * Found by running the real bot, not by reading the serializers.
@@ -21,37 +22,17 @@ import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
  *     -> MentionSerializer attributes :id, :username, :url, :acct
  */
 
-const BOT_AUTH = { Authorization: "Bearer mock-token" };
-type Json = Record<string, unknown>;
-const jsonOf = async (res: Response) => (await res.json()) as Json;
-
-async function start() {
-  const server = new MockMastodonServer({
-    botAcct: "bot@mock.social",
-    hostAcct: "host@mock.social",
-    playerAcct: "player@mock.social",
-  });
-  server.registerToken("host-token", "host@mock.social");
-  server.registerToken("player-token", "player@mock.social");
-  await server.start();
-  return server;
-}
-
 const hostPost = (server: MockMastodonServer, text: string) =>
-  fetch(`${server.baseUrl}/api/v1/statuses`, {
-    method: "POST",
-    headers: { Authorization: "Bearer host-token", "Content-Type": "application/json" },
-    body: JSON.stringify({ status: text }),
-  });
+  post(server, { status: text }, "host-token");
 
 describe("status mentions array (REST::StatusSerializer)", () => {
   let server: MockMastodonServer;
   beforeEach(async () => {
-    server = await start();
+    server = await startMock();
   });
 
   it("lists the mentioned account with id, username, url and acct", async () => {
-    const created = await jsonOf(await hostPost(server, "@bot newgame round"));
+    const created = await hostPost(server, "@bot newgame round");
     const mentions = created.mentions as Array<Record<string, unknown>>;
     expect(mentions.length).toBe(1);
     // MentionSerializer attributes: :id, :username, :url, :acct
@@ -63,14 +44,14 @@ describe("status mentions array (REST::StatusSerializer)", () => {
   });
 
   it("lists every mentioned account, deduplicated", async () => {
-    const created = await jsonOf(await hostPost(server, "@bot duel @player"));
+    const created = await hostPost(server, "@bot duel @player");
     const mentions = created.mentions as Array<{ username: string }>;
     expect(mentions.map((m) => m.username).sort()).toEqual(["bot", "player"]);
     await server.stop();
   });
 
   it("returns an empty mentions array for a status that mentions nobody", async () => {
-    const created = await jsonOf(await hostPost(server, "just a note"));
+    const created = await hostPost(server, "just a note");
     expect(created.mentions).toEqual([]);
     await server.stop();
   });
@@ -82,7 +63,7 @@ describe("status mentions array (REST::StatusSerializer)", () => {
     const n = (
       (await (
         await fetch(`${server.baseUrl}/api/v1/notifications?limit=5`, {
-          headers: BOT_AUTH,
+          headers: AUTH,
         })
       ).json()) as Json[]
     )[0];

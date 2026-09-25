@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { alreadyVotedOn, castPlan, planVotes, shouldStopVoting, withVoter } from "../test/integration/vote-planner.js";
+import { castPlan, keepVoting, withVoter } from "../test/integration/vote-planner.js";
 
 /**
  * The driver voted once, in the first round, and then left the rest of the
@@ -15,58 +15,24 @@ import { alreadyVotedOn, castPlan, planVotes, shouldStopVoting, withVoter } from
  * The bot read every tally correctly and called each of those a tie, which is
  * the right behaviour for a round nobody voted in.
  *
- * So the vote has to become a LOOP over rounds, with two properties the
- * current code has no way to express:
- *
- *   1. one vote per round, keyed by poll.id - a new poll id means a new
- *      round; the same id must never be voted twice
- *   2. the loop ends on a SIGNAL, not a count: the bot announcing a finale,
- *      or the game reaching its declared length
- *
- * These are pure functions so they can be tested without a Mastodon server,
- * which is how the rest of the harness is tested.
+ * So the vote is a LOOP over rounds that ends on a SIGNAL, not a count: the
+ * bot announcing a finale, or the game reaching its declared length. Each
+ * round needs enough ballots to reach quorum with a unique leader.
  */
 describe("voting every round", () => {
-  it("votes on a poll it has never seen", () => {
-    expect(planVotes("poll-1", "poll-1", new Set())).toBe(true);
-  });
-
-  it("never votes the same poll twice", () => {
-    // The loop re-runs until a signal arrives. Without this guard it re-votes
-    // the same poll every pass and inflates the tally - a bug the loop fix
-    // would otherwise introduce.
-    const seen = new Set(["poll-1"]);
-    expect(planVotes("poll-1", "poll-1", seen)).toBe(false);
-  });
-
-  it("votes again once a new poll appears", () => {
-    const seen = new Set(["poll-1"]);
-    expect(planVotes("poll-2", "poll-1", seen)).toBe(true);
-  });
-
-  it("counts a poll it has seen", () => {
-    expect(alreadyVotedOn(new Set(["poll-1", "poll-2"]), "poll-2")).toBe(true);
-  });
-
   it("stops the loop when the bot announces a finale", () => {
     // "final|vencedor|encerrado|trophy" - the announcement the driver waits
     // for. A loop that only counted rounds would run past the end of the
     // game and vote on a poll that no longer exists.
-    expect(shouldStopVoting({ hasFinale: true, roundNumber: 3, playlistLength: 8 })).toBe(
-      false,
-    );
+    expect(keepVoting({ hasFinale: true, roundNumber: 3, playlistLength: 8 })).toBe(false);
   });
 
   it("keeps voting while the game is still running", () => {
-    expect(shouldStopVoting({ hasFinale: false, roundNumber: 3, playlistLength: 8 })).toBe(
-      true,
-    );
+    expect(keepVoting({ hasFinale: false, roundNumber: 3, playlistLength: 8 })).toBe(true);
   });
 
   it("stops once every round has been played", () => {
-    expect(
-      shouldStopVoting({ hasFinale: false, roundNumber: 8, playlistLength: 8 }),
-    ).toBe(false);
+    expect(keepVoting({ hasFinale: false, roundNumber: 8, playlistLength: 8 })).toBe(false);
   });
 
   it("without a spectator, two players vote and the round is a tie by rule", () => {

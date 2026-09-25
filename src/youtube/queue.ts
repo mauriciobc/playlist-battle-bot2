@@ -8,43 +8,27 @@
  * request, so the resolved link is persisted by the finale workflow before posting.
  */
 
-const WATCH_VIDEOS_ENDPOINT = "https://www.youtube.com/watch_videos";
-const WATCH_URL_PREFIX = "https://www.youtube.com/watch?";
-const LIST_QUERY = "list=";
+const QUEUE_TIMEOUT_MS = 10_000;
 
 /**
- * A single tune is not a queue — that tune already gets its own finale post
- * (PRD §5.7), so one-tune battles publish no link at all.
- */
-export const MIN_QUEUE_TUNES = 2;
-
-/** Request URL for the anonymous queue of `videoIds`, in play order. */
-export function watchVideosUrl(videoIds: string[]): string {
-  return `${WATCH_VIDEOS_ENDPOINT}?video_ids=${videoIds.join(",")}`;
-}
-
-/**
- * Resolve `videoIds` into a shareable queue URL, or null when YouTube does not
- * answer with a playlist redirect. A finale must still post without the link,
- * so this never throws.
+ * Resolve `videoIds` (in play order) into a shareable queue URL, or null when
+ * YouTube does not answer with a playlist redirect. A finale must still post
+ * without the link, so this never throws.
  */
 export async function resolveQueueUrl(
   videoIds: string[],
-  opts: { fetchImpl?: typeof fetch; requestTimeoutMs?: number } = {},
+  opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<string | null> {
-  if (videoIds.length < MIN_QUEUE_TUNES) return null;
-
-  const fetchImpl = opts.fetchImpl ?? fetch;
   try {
-    const res = await fetchImpl(watchVideosUrl(videoIds), {
-      redirect: "manual",
-      signal: AbortSignal.timeout(opts.requestTimeoutMs ?? 10_000),
-    });
+    // A followed redirect would return the final page instead of the URL.
+    const res = await (opts.fetchImpl ?? fetch)(
+      `https://www.youtube.com/watch_videos?video_ids=${videoIds.join(",")}`,
+      { redirect: "manual", signal: AbortSignal.timeout(QUEUE_TIMEOUT_MS) },
+    );
     const location = res.headers.get("location");
-    if (!location || !location.startsWith(WATCH_URL_PREFIX) || !location.includes(LIST_QUERY)) {
-      return null;
-    }
-    return location;
+    return location?.startsWith("https://www.youtube.com/watch?") && location.includes("list=")
+      ? location
+      : null;
   } catch {
     return null;
   }

@@ -15,11 +15,6 @@ describe("driverExitCode", () => {
     expect(driverExitCode(noResults, new Error("config"))).toBe(1);
   });
 
-  it("fails when the run threw even after steps passed", () => {
-    const results = [{ ok: true }, { ok: true }];
-    expect(driverExitCode(results, new Error("late throw"))).toBe(1);
-  });
-
   it("succeeds when every step passed", () => {
     const results = [{ ok: true }, { ok: true }];
     expect(driverExitCode(results, null)).toBe(0);

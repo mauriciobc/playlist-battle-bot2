@@ -25,9 +25,8 @@ export function extractVideoId(raw: string): string | null {
     return null;
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-  if (!ALLOWED_HOSTS.has(url.hostname.toLowerCase())) return null;
-
   const host = url.hostname.toLowerCase();
+  if (!ALLOWED_HOSTS.has(host)) return null;
 
   // youtu.be/<id>
   if (host === "youtu.be" || host === "www.youtu.be") {

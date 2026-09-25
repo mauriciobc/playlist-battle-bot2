@@ -1,13 +1,24 @@
-import { transition } from "./stateMachine.js";
 import {
-  awardVotePoints,
   applyPotBonus,
+  awardVotePoints,
+  finalTieSharers,
   resolveRoundScore,
   splitPotAmong,
-  ROUND_QUORUM,
 } from "./scoring.js";
-import type { Game, GameStatus, Player, Tune } from "./types.js";
+import {
+  isValidPlaylistLength,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  type Game,
+  type GameStatus,
+  type Player,
+  type PotSplit,
+  type Tally,
+  type Tune,
+  type TuneDraft,
+} from "./types.js";
 import { m, type Messages } from "../i18n/index.js";
+import { addSeconds } from "../time.js";
 
 /**
  * Pure game engine — all PRD §5/§6/§7 lifecycle logic with zero I/O.
@@ -16,7 +27,7 @@ import { m, type Messages } from "../i18n/index.js";
  * process locale at call time) so domain errors never silently depend on global state.
  */
 
-export type Participant = {
+type Participant = {
   accountId: string;
   acct: string;
 };
@@ -47,14 +58,13 @@ export function validateCreate(input: CreateGameInput, msg: Messages = m()): voi
   if (theme.trim().length > MAX_THEME_LENGTH) {
     throw new ValidationError(msg.errThemeTooLong(MAX_THEME_LENGTH));
   }
-  if (playlistLength < 8 || playlistLength > 12) {
+  if (!isValidPlaylistLength(playlistLength)) {
     throw new ValidationError(msg.errLengthRange());
   }
-  if (challengers.length < 1) {
+  if (1 + challengers.length < MIN_PLAYERS) {
     throw new ValidationError(msg.errMinChallenger());
   }
-  const total = 1 + challengers.length;
-  if (total > 4) {
+  if (1 + challengers.length > MAX_PLAYERS) {
     throw new ValidationError(msg.errMaxPlayers());
   }
   const ids = [host.accountId, ...challengers.map((c) => c.accountId)];
@@ -70,13 +80,11 @@ export function createGameInput(
 ): { game: Game; players: Player[] } {
   validateCreate(input, msg);
   const nowIso = input.now.toISOString();
-  const acceptanceDeadline = new Date(
-    input.now.getTime() + cfg.acceptanceWindowSec * 1000,
-  ).toISOString();
+  const acceptanceDeadline = addSeconds(input.now, cfg.acceptanceWindowSec).toISOString();
 
   const game: Game = {
     id: cfg.id,
-    status: transition("CREATED", "INVITE_SENT"),
+    status: "INVITED",
     theme: input.theme.trim(),
     playlistLength: input.playlistLength,
     hostAccountId: input.host.accountId,
@@ -95,7 +103,6 @@ export function createGameInput(
     {
       accountId: input.host.accountId,
       acct: input.host.acct,
-      displayName: null,
       role: "host",
       inviteStatus: "accepted",
       points: 0,
@@ -105,7 +112,6 @@ export function createGameInput(
       (c): Player => ({
         accountId: c.accountId,
         acct: c.acct,
-        displayName: null,
         role: "challenger",
         inviteStatus: "pending",
         points: 0,
@@ -117,6 +123,15 @@ export function createGameInput(
   return { game, players };
 }
 
+function findInvitedChallenger(players: Player[], accountId: string, msg: Messages): Player {
+  const target = players.find((p) => p.accountId === accountId);
+  if (target?.role !== "challenger") {
+    throw new ValidationError(msg.errNotInvited());
+  }
+  return target;
+}
+
+/** A challenger joins; the first acceptance opens submissions (COLLECTING). */
 export function acceptInvite(
   game: Game,
   players: Player[],
@@ -124,11 +139,7 @@ export function acceptInvite(
   now: Date = new Date(),
   msg: Messages = m(),
 ): { game: Game; players: Player[]; firstAccept: boolean } {
-  const nowIso = now.toISOString();
-  const target = players.find((p) => p.accountId === accountId);
-  if (!target || target.role !== "challenger") {
-    throw new ValidationError(msg.errNotInvited());
-  }
+  const target = findInvitedChallenger(players, accountId, msg);
   if (target.inviteStatus === "declined") {
     throw new ValidationError(msg.errAlreadyDeclined());
   }
@@ -136,18 +147,16 @@ export function acceptInvite(
     return { game, players, firstAccept: false };
   }
 
+  const nowIso = now.toISOString();
   const updated = players.map((p) =>
     p.accountId === accountId
       ? { ...p, inviteStatus: "accepted" as const, joinedAt: nowIso }
       : p,
   );
-  const alreadyCollecting = game.status === "COLLECTING";
-  const anyAccepted = updated.some((p) => p.role === "challenger" && p.inviteStatus === "accepted");
-  const status: GameStatus = alreadyCollecting || !anyAccepted ? game.status : transition("INVITED", "FIRST_ACCEPT");
   return {
-    game: { ...game, status, updatedAt: nowIso },
+    game: { ...game, status: "COLLECTING", updatedAt: nowIso },
     players: updated,
-    firstAccept: !alreadyCollecting && anyAccepted,
+    firstAccept: game.status !== "COLLECTING",
   };
 }
 
@@ -157,10 +166,7 @@ export function declineInvite(
   accountId: string,
   msg: Messages = m(),
 ): { game: Game; players: Player[] } {
-  const target = players.find((p) => p.accountId === accountId);
-  if (!target || target.role !== "challenger") {
-    throw new ValidationError(msg.errNotInvited());
-  }
+  const target = findInvitedChallenger(players, accountId, msg);
   if (target.inviteStatus === "accepted") {
     throw new ValidationError(msg.errAlreadyAccepted());
   }
@@ -172,21 +178,23 @@ export function declineInvite(
   return { game, players: updated };
 }
 
-export type TuneDraft = Pick<Tune, "videoId" | "title" | "canonicalUrl">;
+function isCollectingAt(game: Game, now: Date): boolean {
+  return game.status === "COLLECTING" &&
+    game.submissionDeadline !== null &&
+    now.getTime() < new Date(game.submissionDeadline).getTime();
+}
 
+/** Append `draft` to the player's playlist; returns every tune of the game. */
 export function submitTune(
   game: Game,
   players: Player[],
   tunes: Tune[],
   accountId: string,
   draft: TuneDraft,
-  msg: Messages = m(),
   now: Date = new Date(),
+  msg: Messages = m(),
 ): Tune[] {
-  if (game.status !== "COLLECTING") {
-    throw new ValidationError(msg.errNotCollecting());
-  }
-  if (!game.submissionDeadline || new Date(game.submissionDeadline).getTime() <= now.getTime()) {
+  if (!isCollectingAt(game, now)) {
     throw new ValidationError(msg.errNotCollecting());
   }
   const isPlayer = players.some(
@@ -202,20 +210,24 @@ export function submitTune(
   if (mine.some((t) => t.videoId === draft.videoId)) {
     throw new ValidationError(msg.errVideoDup());
   }
-  const position = mine.length + 1;
-  return [
-    ...tunes,
-    {
-      accountId,
-      position,
-      videoId: draft.videoId,
-      title: draft.title,
-      canonicalUrl: draft.canonicalUrl,
-    },
-  ];
+  const { videoId, title, canonicalUrl } = draft;
+  return [...tunes, { accountId, position: mine.length + 1, videoId, title, canonicalUrl }];
 }
 
 export type FinalizeOutcome = "ready" | "fizzled" | "default_win";
+
+const STATUS_AFTER_COLLECTION: Record<FinalizeOutcome, GameStatus> = {
+  ready: "READY",
+  fizzled: "FIZZLED",
+  // Exactly one complete playlist → no duel, that player wins by default.
+  default_win: "FINALE",
+};
+
+function finalizeOutcome(completePlaylists: number): FinalizeOutcome {
+  if (completePlaylists === 0) return "fizzled";
+  if (completePlaylists === 1) return "default_win";
+  return "ready";
+}
 
 /**
  * v1.1 full commitment: a playlist is valid only if complete. At the deadline,
@@ -226,7 +238,6 @@ export function finalizeCollection(
   game: Game,
   players: Player[],
   tunes: Tune[],
-  playlistLength: number,
   now: Date,
 ): {
   game: Game;
@@ -235,60 +246,34 @@ export function finalizeCollection(
   defaultWinnerId: string | null;
 } {
   const nowIso = now.toISOString();
-  const accepted = players.filter((p) => p.inviteStatus === "accepted");
-
-  const countFor = (accountId: string) =>
+  const tuneCount = (accountId: string) =>
     tunes.filter((t) => t.accountId === accountId).length;
 
-  const completeIds = accepted.filter((p) => countFor(p.accountId) === playlistLength).map((p) => p.accountId);
+  const completeIds = players
+    .filter((p) => p.inviteStatus === "accepted" && tuneCount(p.accountId) === game.playlistLength)
+    .map((p) => p.accountId);
+  const updatedPlayers = players.map((p) =>
+    p.inviteStatus === "accepted" && tuneCount(p.accountId) < game.playlistLength
+      ? { ...p, inviteStatus: "declined" as const }
+      : p,
+  );
 
-  const updatedPlayers = players.map((p) => {
-    if (p.inviteStatus !== "accepted") return p;
-    if (countFor(p.accountId) < playlistLength) {
-      // Withdrawn — incomplete at the deadline (v1.1 full commitment).
-      return { ...p, inviteStatus: "declined" as const };
-    }
-    return p;
-  });
-
-  const base: Game = { ...game, updatedAt: nowIso };
-
-  // Exactly one complete playlist → no duel, that player wins by default.
-  if (completeIds.length === 1) {
-    return {
-      game: { ...base, status: transition("COLLECTING", "DEFAULT_WIN") },
-      players: updatedPlayers,
-      outcome: "default_win",
-      defaultWinnerId: completeIds[0]!,
-    };
-  }
-
-  if (completeIds.length === 0) {
-    return {
-      game: { ...base, status: transition("COLLECTING", "FIZZLE") },
-      players: updatedPlayers,
-      outcome: "fizzled",
-      defaultWinnerId: null,
-    };
-  }
-
-  // Two or more complete playlists.
+  const outcome = finalizeOutcome(completeIds.length);
+  const finalized: Game = { ...game, status: STATUS_AFTER_COLLECTION[outcome], updatedAt: nowIso };
+  // A duel that starts now closes submissions now.
+  if (outcome === "ready") finalized.submissionDeadline = nowIso;
   return {
-    game: {
-      ...base,
-      status: transition("COLLECTING", "SUBMISSION_WINDOW_EXPIRED", "READY"),
-      submissionDeadline: nowIso,
-    },
+    game: finalized,
     players: updatedPlayers,
-    outcome: "ready",
-    defaultWinnerId: null,
+    outcome,
+    defaultWinnerId: outcome === "default_win" ? completeIds[0]! : null,
   };
 }
 
 export function startRound(game: Game, round: number, now: Date = new Date()): Game {
   return {
     ...game,
-    status: transition("READY", "START_ROUND"),
+    status: "ROUND",
     currentRound: round,
     updatedAt: now.toISOString(),
   };
@@ -297,76 +282,40 @@ export function startRound(game: Game, round: number, now: Date = new Date()): G
 export type ResolveRoundInput = {
   game: Game;
   players: Player[];
-  tallies: { accountId: string; votes: number }[];
+  tallies: Tally[];
   roundNumber: number;
-  playlistLength: number;
   now: Date;
 };
-
-export type FinalSplit = { total: number; each: number; count: number };
 
 export function resolveRound(input: ResolveRoundInput): {
   game: Game;
   players: Player[];
   winnerAccountId: string | null;
   potAwarded: number;
-  finalSplit: FinalSplit | null;
-  nextState: GameStatus;
+  finalSplit: PotSplit | null;
 } {
-  const { game, players, tallies, roundNumber, playlistLength, now } = input;
+  const { game, players, tallies, roundNumber, now } = input;
 
   const score = resolveRoundScore({ tallies, pot: game.pot });
-  let updated = awardVotePoints(players, tallies);
-
-  const isFinal = roundNumber >= playlistLength;
-  let potAfter = score.potAfter;
-  let finalSplit: FinalSplit | null = null;
-
-  if (isFinal && score.winnerAccountId === null) {
-    // Final-round tie (v1.1): split the pre-round pot among the tied players
-    // (integer division, remainder discarded); the pot does not grow.
-    const totalVotes = tallies.reduce((sum, t) => sum + t.votes, 0);
-    const sorted = [...tallies].sort((a, b) => b.votes - a.votes);
-    const top = sorted[0];
-    const uniqueLeader =
-      top !== undefined &&
-      top.votes > 0 &&
-      tallies.filter((t) => t.votes === top.votes).length === 1;
-    const quorumForced = tallies.length > 0 && totalVotes < ROUND_QUORUM && uniqueLeader;
-    let tiedIds: string[];
-    if (quorumForced) {
-      // Quorum-forced tie with a unique leader → all poll participants share.
-      tiedIds = tallies.map((t) => t.accountId);
-    } else {
-      const topVotes = top?.votes ?? 0;
-      tiedIds = tallies.filter((t) => t.votes === topVotes).map((t) => t.accountId);
-    }
-    const split = splitPotAmong(updated, tiedIds, game.pot);
-    updated = split.players;
-    potAfter = 0;
-    if (split.splitTotal > 0) {
-      finalSplit = { total: split.splitTotal, each: split.splitEach, count: tiedIds.length };
-    }
-  } else {
-    updated = applyPotBonus(updated, score.winnerAccountId, score.potAwarded);
-  }
-
-  const nextStatus = isFinal
-    ? transition("ROUND", "ROUND_RESOLVED", "FINALE")
-    : transition("ROUND", "ROUND_RESOLVED", "ROUND");
+  const voted = awardVotePoints(players, tallies);
+  const isFinal = roundNumber >= game.playlistLength;
+  // Final-round tie (v1.1): the pre-round pot is split, and never grows.
+  const isFinalTie = isFinal && score.winnerAccountId === null;
+  const settled = isFinalTie
+    ? splitPotAmong(voted, finalTieSharers(tallies), game.pot)
+    : { players: applyPotBonus(voted, score.winnerAccountId, score.potAwarded), split: null };
 
   return {
     game: {
       ...game,
-      status: nextStatus,
-      pot: potAfter,
+      status: isFinal ? "FINALE" : "ROUND",
+      pot: isFinalTie ? 0 : score.potAfter,
       currentRound: isFinal ? roundNumber : roundNumber + 1,
       updatedAt: now.toISOString(),
     },
-    players: updated,
+    players: settled.players,
     winnerAccountId: score.winnerAccountId,
     potAwarded: score.potAwarded,
-    finalSplit,
-    nextState: nextStatus,
+    finalSplit: settled.split,
   };
 }

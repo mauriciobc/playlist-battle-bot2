@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { toUnixSeconds } from "../time.js";
 
 /**
  * Minimal authenticated YouTube Music (InnerTube) client — exactly the two
@@ -22,6 +23,7 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0";
 const SAPISID_COOKIE = "__Secure-3PAPISID";
 const SUCCESS = "STATUS_SUCCEEDED";
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export type PlaylistPrivacy = "PUBLIC" | "PRIVATE" | "UNLISTED";
 
@@ -32,7 +34,7 @@ export type YtMusicAuth = {
   authUser?: number;
 };
 
-export type YtMusicErrorKind = "auth" | "gated" | "rejected" | "transport";
+type YtMusicErrorKind = "auth" | "gated" | "rejected" | "transport";
 
 /** Every failure carries the operator action it implies (kind) plus the detail. */
 export class YtMusicError extends Error {
@@ -86,17 +88,15 @@ function gatedTag(body: unknown): string | null {
   return null;
 }
 
-export type YtMusicPlaylistClientOptions = {
+type YtMusicPlaylistClientOptions = {
   auth: YtMusicAuth;
   fetchImpl?: typeof fetch;
-  requestTimeoutMs?: number;
 };
 
 export class YtMusicPlaylistClient {
   private readonly cookies: Map<string, string>;
   private readonly authUser: number;
   private readonly fetchImpl: typeof fetch;
-  private readonly requestTimeoutMs: number;
   private readonly sapisid: string;
 
   constructor(opts: YtMusicPlaylistClientOptions) {
@@ -111,7 +111,6 @@ export class YtMusicPlaylistClient {
     this.sapisid = sapisid;
     this.authUser = opts.auth.authUser ?? 0;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000;
   }
 
   /** Creates an empty playlist in the account's library and returns its ID. */
@@ -173,7 +172,7 @@ export class YtMusicPlaylistClient {
           "user-agent": USER_AGENT,
         },
         body,
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {
       throw new YtMusicError("transport", `${path}: request failed`, { cause: err });
@@ -215,7 +214,7 @@ export class YtMusicPlaylistClient {
   }
 
   private sapisidHash(): string {
-    const timestamp = Math.floor(Date.now() / 1000);
+    const timestamp = toUnixSeconds(Date.now());
     const digest = createHash("sha1")
       .update(`${timestamp} ${this.sapisid} ${ORIGIN}`)
       .digest("hex");
@@ -233,6 +232,6 @@ export class YtMusicPlaylistClient {
  * YT Music addresses playlists by bare ID for writes; a `VL`-prefixed ID (the
  * form copied from a watch URL) is rejected.
  */
-export function trimPlaylistIdPrefix(playlistId: string): string {
+function trimPlaylistIdPrefix(playlistId: string): string {
   return playlistId.toUpperCase().startsWith("VL") ? playlistId.slice(2) : playlistId;
 }

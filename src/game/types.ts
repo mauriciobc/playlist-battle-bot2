@@ -26,34 +26,26 @@ export const TERMINAL_STATUSES: readonly GameStatus[] = [
   "CANCELLED",
 ];
 
-/**
- * Whether a game still counts as open.
- *
- * The harness needs this to decide whether the environment is clean before
- * a run, and an ad-hoc query is a trap: mine listed CLOSED/FINALIZED/
- * CANCELLED, where FINALIZED is not a GameStatus and FIZZLED, EXPIRED and
- * FORFEIT were missing. It reported a FIZZLED game as open. Everything that
- * judges "open" must use this one definition, the same one
- * openGamesForAccount gates on via NON_TERMINAL_STATUS_SQL.
- */
-export function isOpen(status: GameStatus): boolean {
-  return !TERMINAL_STATUSES.includes(status);
-}
+/** Tunes per playlist — and therefore rounds per duel. */
+export const MIN_PLAYLIST_LENGTH = 8;
+export const MAX_PLAYLIST_LENGTH = 12;
 
-/** Filter a mixed list down to the games that are still running. */
-export function openGames<T extends { status: GameStatus }>(games: ReadonlyArray<T>): T[] {
-  return games.filter((g) => isOpen(g.status));
-}
+/** A duel needs two players; Mastodon polls carry at most four options, one per player. */
+export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 4;
+export const MAX_CHALLENGERS = MAX_PLAYERS - 1;
 
-export type PlayerRole = "host" | "challenger";
-export type InviteStatus = "pending" | "accepted" | "declined" | "expired";
+export const FIRST_ROUND = 1;
+
+export function isValidPlaylistLength(length: number): boolean {
+  return length >= MIN_PLAYLIST_LENGTH && length <= MAX_PLAYLIST_LENGTH;
+}
 
 export type Player = {
   accountId: string;
   acct: string; // account handle for mentions (user@domain when remote)
-  displayName: string | null;
-  role: PlayerRole;
-  inviteStatus: InviteStatus;
+  role: "host" | "challenger";
+  inviteStatus: "pending" | "accepted" | "declined" | "expired";
   points: number;
   joinedAt: string | null;
 };
@@ -66,18 +58,14 @@ export type Tune = {
   canonicalUrl: string;
 };
 
-export type RoundStatus = "announced" | "poll_open" | "auto_tied" | "resolved" | "walkover";
+/** A tune as resolved from YouTube, before it takes a playlist position. */
+export type TuneDraft = Pick<Tune, "videoId" | "title" | "canonicalUrl">;
 
-export type Round = {
-  number: number;
-  status: RoundStatus;
-  pollStatusId: string | null;
-  pollId: string | null;
-  pollExpiresAt: string | null;
-  winnerAccountId: string | null;
-  /** poll option index → accountId */
-  optionMap: Record<string, string>;
-};
+/** Votes one player's tune received in a round poll. */
+export type Tally = { accountId: string; votes: number };
+
+/** Final-round pot split: `count` tied players get `each` points, `total` in all. */
+export type PotSplit = { total: number; each: number; count: number };
 
 export type Game = {
   id: string;
@@ -112,38 +100,18 @@ export function eligibleForRound(
   round: number,
   excluded?: ReadonlySet<string>,
 ): string[] {
-  const byAccount = new Map<string, Tune[]>();
-  for (const t of tunes) {
-    const list = byAccount.get(t.accountId) ?? [];
-    list.push(t);
-    byAccount.set(t.accountId, list);
-  }
-  const ids: string[] = [];
-  for (const p of players) {
-    if (p.inviteStatus !== "accepted") continue;
-    if (excluded?.has(p.accountId)) continue;
-    const list = byAccount.get(p.accountId);
-    if (list && list.some((t) => t.position === round)) ids.push(p.accountId);
-  }
-  return ids;
-}
-
-/** Video IDs played in round k (for auto-tie detection). */
-export function videoIdsInRound(tunes: Tune[], round: number): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const t of tunes) {
-    if (t.position !== round) continue;
-    const list = map.get(t.videoId) ?? [];
-    list.push(t.accountId);
-    map.set(t.videoId, list);
-  }
-  return map;
+  return players
+    .filter(
+      (p) =>
+        p.inviteStatus === "accepted" &&
+        !excluded?.has(p.accountId) &&
+        tunes.some((t) => t.accountId === p.accountId && t.position === round),
+    )
+    .map((p) => p.accountId);
 }
 
 /** PRD §5.6: same canonical video for multiple players → automatic tie, no poll. */
 export function hasRoundCollision(tunes: Tune[], round: number): boolean {
-  for (const accounts of videoIdsInRound(tunes, round).values()) {
-    if (accounts.length > 1) return true;
-  }
-  return false;
+  const videoIds = tunes.filter((t) => t.position === round).map((t) => t.videoId);
+  return new Set(videoIds).size !== videoIds.length;
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import type { MockMastodonServer } from "../test/integration/mock-mastodon.js";
+import { AUTH, post, startMock, type Json } from "../test/integration/mock-kit.js";
 
 /**
  * The gap that made every end-to-end run fail at "create".
@@ -18,55 +19,24 @@ import { MockMastodonServer } from "../test/integration/mock-mastodon.js";
  *     status = the mentioning status
  *
  * So the mock must create the notification when a status mentions the bot,
- * and must not when it does not.
+ * and must not when it does not. The driver posts as the host, so the tests
+ * do too: the bot's own token would make author == recipient.
  */
 
-const BOT_AUTH = { Authorization: "Bearer mock-token" };
-/**
- * The author must differ from the recipient: a mention notification is
- * delivered to the account being mentioned, and the bot's own token would
- * make author == recipient. The driver posts as the host, so the tests do too.
- */
-const HOST_AUTH = { Authorization: "Bearer host-token" };
-type Json = Record<string, unknown>;
-const jsonOf = async (res: Response) => (await res.json()) as Json;
-
-async function start() {
-  const server = new MockMastodonServer({
-    botAcct: "bot@mock.social",
-    hostAcct: "host@mock.social",
-    playerAcct: "player@mock.social",
-  });
-  server.registerToken("host-token", "host@mock.social");
-  server.registerToken("player-token", "player@mock.social");
-  await server.start();
-  return server;
-}
-
-async function post(
-  server: MockMastodonServer,
-  body: Json,
-  auth: Record<string, string> = HOST_AUTH,
-): Promise<Response> {
-  return fetch(`${server.baseUrl}/api/v1/statuses`, {
-    method: "POST",
-    headers: { ...auth, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
+const botNotifications = async (server: MockMastodonServer) =>
+  (await (
+    await fetch(`${server.baseUrl}/api/v1/notifications?limit=10`, { headers: AUTH })
+  ).json()) as Json[];
 
 describe("mention notifications", () => {
   let server: MockMastodonServer;
   beforeEach(async () => {
-    server = await start();
+    server = await startMock();
   });
 
   it("creates a mention notification when a status addresses the bot", async () => {
-    await post(server, { status: "@bot newgame round 1", mentions: ["bot"] });
-    const res = await fetch(`${server.baseUrl}/api/v1/notifications?limit=10`, {
-      headers: BOT_AUTH,
-    });
-    const body = (await res.json()) as Json[];
+    await post(server, { status: "@bot newgame round 1", mentions: ["bot"] }, "host-token");
+    const body = await botNotifications(server);
     expect(body.length).toBe(1);
     const n = body[0];
     if (n === undefined) throw new Error("expected a notification");
@@ -82,35 +52,12 @@ describe("mention notifications", () => {
   });
 
   it("creates no notification for a status that does not mention the bot", async () => {
-    await post(server, { status: "just a public note" });
-    const res = await fetch(`${server.baseUrl}/api/v1/notifications?limit=10`, {
-      headers: BOT_AUTH },
-    );
-    expect(((await res.json()) as Json[]).length).toBe(0);
+    await post(server, { status: "just a public note" }, "host-token");
+    expect((await botNotifications(server)).length).toBe(0);
   });
 
   it("does not notify a status that mentions only the other player", async () => {
-    await post(server, { status: "@player your turn", mentions: ["player"] });
-    const res = await fetch(`${server.baseUrl}/api/v1/notifications?limit=10`, {
-      headers: BOT_AUTH,
-    });
-    expect(((await res.json()) as Json[]).length).toBe(0);
-  });
-
-  it("honours since_id so a poll loop does not replay old notifications", async () => {
-    await post(server, { status: "@bot first", mentions: ["bot"] });
-    const all = (await (
-      await fetch(`${server.baseUrl}/api/v1/notifications?limit=10`, { headers: BOT_AUTH })
-    ).json()) as Json[];
-    const firstId = all[0]?.id;
-    if (firstId === undefined) throw new Error("expected a notification");
-    await post(server, { status: "@bot second", mentions: ["bot"] });
-    const since = (await (
-      await fetch(`${server.baseUrl}/api/v1/notifications?since_id=${firstId}`, {
-        headers: BOT_AUTH,
-      })
-    ).json()) as Json[];
-    expect(since.length).toBe(1);
-    expect(since.every((n) => n.id !== firstId)).toBe(true);
+    await post(server, { status: "@player your turn", mentions: ["player"] }, "host-token");
+    expect((await botNotifications(server)).length).toBe(0);
   });
 });

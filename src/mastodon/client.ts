@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db/index.js";
+import { createOutboxEffect, markOutboxFailed, markOutboxSent, type OutboxMethod } from "../db/outbox.js";
+import { errorMessage } from "../errors.js";
+import { fromUnixSeconds, MS_PER_SECOND, toUnixSeconds } from "../time.js";
 import type { Logger } from "../logger.js";
-import {
-  createOutboxEffect,
-  markOutboxFailed,
-  markOutboxSent,
-} from "../game/store.js";
 
 export class MastodonApiError extends Error {
   override readonly name = "MastodonApiError";
@@ -23,35 +21,36 @@ export class MastodonApiError extends Error {
   }
 }
 
+export const HTTP_TOO_MANY_REQUESTS = 429;
+
+/** Assumed rate-limit window when Mastodon gives no usable reset time. */
+const DEFAULT_RATE_LIMIT_WINDOW_SEC = 60;
+
+const nowSec = () => toUnixSeconds(Date.now());
+
 export class RateLimitError extends Error {
   override readonly name = "RateLimitError";
   readonly resetAt: number;
 
   constructor(resetAt: number) {
-    const safeResetAt = Number.isFinite(resetAt)
-      ? resetAt
-      : Math.floor(Date.now() / 1000) + 60;
-    super(`Mastodon rate limit exhausted; resets at ${new Date(safeResetAt * 1000).toISOString()}`);
+    const safeResetAt = Number.isFinite(resetAt) ? resetAt : nowSec() + DEFAULT_RATE_LIMIT_WINDOW_SEC;
+    super(`Mastodon rate limit exhausted; resets at ${fromUnixSeconds(safeResetAt).toISOString()}`);
     this.resetAt = safeResetAt;
   }
 }
 
-export type RateLimitState = {
+type RateLimitState = {
   limit: number;
   remaining: number;
   resetAt: number; // unix seconds
 };
 
-export type MastodonClientOptions = {
+type MastodonClientOptions = {
   baseUrl: string;
   token: string;
   fetchImpl?: typeof fetch;
-  /** Base delay for exponential backoff between retries (ms). */
-  retryBaseDelayMs?: number;
   maxRetries?: number;
-  requestTimeoutMs?: number;
   db?: Db;
-  sleepImpl?: (ms: number) => Promise<void>;
   /** Optional structured logger for live debugging (never logs credentials). */
   log?: Logger;
 };
@@ -61,17 +60,30 @@ export type RequestOptions = {
   idempotencyKey?: string;
 };
 
-const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** One logical request across its retries. */
+type RequestAttempt = {
+  method: string;
+  path: string;
+  url: string;
+  startedAt: number;
+  /** Retries so far (0 on the first try). */
+  retries: number;
+};
+
+const DEFAULT_MAX_RETRIES = 2;
+const REQUEST_TIMEOUT_MS = 15_000;
+/** Base delay for exponential backoff between retries. */
+const RETRY_BASE_DELAY_MS = 500;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const backoffMs = (retries: number) => RETRY_BASE_DELAY_MS * 2 ** retries;
 
 export class MastodonClient {
   readonly baseUrl: string;
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly retryBaseDelayMs: number;
   private readonly maxRetries: number;
-  private   readonly requestTimeoutMs: number;
   private readonly db: Db | undefined;
-  private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: Logger | undefined;
 
   rateLimit: RateLimitState | null = null;
@@ -80,11 +92,8 @@ export class MastodonClient {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.retryBaseDelayMs = opts.retryBaseDelayMs ?? 500;
-    this.maxRetries = opts.maxRetries ?? 2;
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000;
+    this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.db = opts.db;
-    this.sleep = opts.sleepImpl ?? defaultSleep;
     this.log = opts.log;
   }
 
@@ -93,19 +102,14 @@ export class MastodonClient {
     return (await res.json()) as T;
   }
 
+  /** GET plus the Link header's rel="prev" URL — the next-newer page when paging forward with min_id. */
   async getWithLink<T>(
     path: string,
     options: RequestOptions = {},
-  ): Promise<{ data: T; linkNext: string | null }> {
+  ): Promise<{ data: T; linkPrev: string | null }> {
     const res = await this.request(path, { method: "GET" }, options);
     const data = (await res.json()) as T;
-    const link = res.headers.get("Link");
-    let linkNext: string | null = null;
-    if (link) {
-      const match = link.match(/<([^>]+)>;\s*rel="next"/);
-      if (match) linkNext = match[1] ?? null;
-    }
-    return { data, linkNext };
+    return { data, linkPrev: prevPageLink(res.headers.get("Link")) };
   }
 
   async post<T>(path: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
@@ -128,166 +132,189 @@ export class MastodonClient {
     init: RequestInit,
     options: RequestOptions,
   ): Promise<Response> {
-    const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
-    const method = (init.method ?? "GET").toUpperCase();
-    const effectId = method !== "GET"
-      ? options.idempotencyKey ?? (this.db ? randomUUID() : null)
-      : null;
-    if (this.db && effectId) {
-      const body = typeof init.body === "string" ? init.body : null;
-      createOutboxEffect(this.db, effectId, method as "POST" | "DELETE", url, body);
-    }
-    const maxRetries = options.maxRetries ?? this.maxRetries;
-    let attempt = 0;
-    let bypassRateLimit = false;
-    const startedAt = Date.now();
+    const attempt: RequestAttempt = {
+      method: (init.method ?? "GET").toUpperCase(),
+      path,
+      url: path.startsWith("http") ? path : `${this.baseUrl}${path}`,
+      startedAt: Date.now(),
+      retries: 0,
+    };
+    const effectId = this.openOutboxEffect(attempt, init, options.idempotencyKey);
 
     try {
-      for (;;) {
-        if (!bypassRateLimit) this.assertRateLimit();
-        bypassRateLimit = false;
-
-        const headers: Record<string, string> = {
-          Authorization: `Bearer ${this.token}`,
-          Accept: "application/json",
-          ...((init.headers as Record<string, string>) ?? {}),
-          ...(effectId ? { "Idempotency-Key": effectId } : {}),
-        };
-
-        let res: Response;
-        try {
-          const merged: RequestInit = {
-            ...init,
-            headers,
-            signal: init.signal ?? AbortSignal.timeout(this.requestTimeoutMs),
-          };
-          res = await this.fetchImpl(url, merged);
-        } catch (err) {
-          if (attempt < maxRetries) {
-            const delayMs = this.retryBaseDelayMs * 2 ** attempt;
-            this.log?.warn(
-              { method, path, attempt: attempt + 1, delayMs, reason: "network" },
-              "mastodon request retry",
-            );
-            await this.sleep(delayMs);
-            attempt += 1;
-            continue;
-          }
-          throw err;
-        }
-
-        this.trackRateLimit(res);
-
-        if (res.ok) {
-          if (this.db && effectId) {
-            try {
-              markOutboxSent(this.db, effectId, null);
-            } catch {
-              // Keep the remote result successful even if ledger persistence fails.
-            }
-          }
-          this.log?.debug(
-            {
-              method,
-              path,
-              status: res.status,
-              attempt,
-              durationMs: Date.now() - startedAt,
-            },
-            "mastodon request ok",
-          );
-          return res;
-        }
-
-        if (res.status === 429) {
-          await safeJson(res);
-          // The 429 carries the same headers as a success, and this is the
-          // only moment they describe the exhausted bucket. Read them
-          // before deciding how long to wait.
-          this.trackRateLimit(res);
-          const retryAfter = Number(res.headers.get("Retry-After") ?? "60");
-          const resetAt = this.rateLimit?.resetAt ??
-            (Number.isFinite(retryAfter) ? Math.floor(Date.now() / 1000) + retryAfter : Math.floor(Date.now() / 1000) + 60);
-          const resetsAt = new Date(resetAt * 1000).toISOString();
-          if (attempt < maxRetries) {
-            // Wait out the true window before the one allowed retry. A
-            // Retry-After guess could be 1s for a window that resets in
-            // minutes, spending another request against that same window.
-            const delayMs = Math.max(0, resetAt * 1000 - Date.now());
-            this.log?.warn(
-              {
-                method,
-                path,
-                attempt: attempt + 1,
-                limit: this.rateLimit?.limit ?? null,
-                remaining: this.rateLimit?.remaining ?? null,
-                reason: "rate_limit",
-                delayMs,
-                resetsAt,
-              },
-              "mastodon request retry",
-            );
-            await this.sleep(delayMs);
-            attempt += 1;
-            bypassRateLimit = true;
-            continue;
-          }
-          this.log?.warn(
-            {
-              method,
-              path,
-              limit: this.rateLimit?.limit ?? null,
-              remaining: this.rateLimit?.remaining ?? null,
-              resetsAt,
-              retryAfterHeader: res.headers.get("Retry-After"),
-              resetHeader: res.headers.get("X-RateLimit-Reset"),
-            },
-            "mastodon rate limit exhausted",
-          );
-          throw new RateLimitError(resetAt);
-        }
-
-        if (res.status >= 500 && attempt < maxRetries) {
-          const delayMs = this.retryBaseDelayMs * 2 ** attempt;
-          this.log?.warn(
-            { method, path, status: res.status, attempt: attempt + 1, delayMs, reason: "server_error" },
-            "mastodon request retry",
-          );
-          await this.sleep(delayMs);
-          attempt += 1;
-          continue;
-        }
-
-        throw new MastodonApiError(res.status, await safeJson(res));
-      }
+      const res = await this.sendWithRetries(attempt, init, effectId, options.maxRetries ?? this.maxRetries);
+      this.settleOutboxEffect(effectId, (db, id) => markOutboxSent(db, id));
+      this.log?.debug(
+        {
+          method: attempt.method,
+          path,
+          status: res.status,
+          attempt: attempt.retries,
+          durationMs: Date.now() - attempt.startedAt,
+        },
+        "mastodon request ok",
+      );
+      return res;
     } catch (err) {
-      if (err instanceof RateLimitError) {
-        this.log?.warn(
-          { method, path, resetAt: err.resetAt, durationMs: Date.now() - startedAt },
-          "mastodon rate limit exhausted",
-        );
-      } else {
-        this.log?.error(
-          {
-            method,
-            path,
-            attempt,
-            durationMs: Date.now() - startedAt,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "mastodon request failed",
-        );
-      }
-      if (this.db && effectId) {
-        const status = err instanceof MastodonApiError && err.status < 500 ? "failed" : "unknown";
-        try {
-          markOutboxFailed(this.db, effectId, err instanceof Error ? err.message : String(err), status);
-        } catch {
-          // The pending ledger row remains available for operator inspection.
-        }
-      }
+      this.logFailure(attempt, err);
+      const status = err instanceof MastodonApiError && err.status < 500 ? "failed" : "unknown";
+      this.settleOutboxEffect(effectId, (db, id) => markOutboxFailed(db, id, errorMessage(err), status));
       throw err;
     }
+  }
+
+  /**
+   * Send until a success, a non-retryable failure, or the retry budget runs
+   * out. Network errors and 5xx back off exponentially; a 429 waits out the
+   * window Mastodon reports.
+   */
+  private async sendWithRetries(
+    attempt: RequestAttempt,
+    init: RequestInit,
+    effectId: string | null,
+    maxRetries: number,
+  ): Promise<Response> {
+    let waitedOutRateLimit = false;
+    for (;; attempt.retries += 1) {
+      if (!waitedOutRateLimit) this.assertRateLimit();
+      waitedOutRateLimit = false;
+      const canRetry = attempt.retries < maxRetries;
+
+      let res: Response;
+      try {
+        res = await this.fetchImpl(attempt.url, {
+          ...init,
+          headers: this.headers(init, effectId),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (err) {
+        if (!canRetry) throw err;
+        await this.waitBeforeRetry(attempt, backoffMs(attempt.retries), { reason: "network" });
+        continue;
+      }
+
+      this.trackRateLimit(res);
+      if (res.ok) return res;
+
+      if (res.status === HTTP_TOO_MANY_REQUESTS) {
+        await safeJson(res);
+        const resetAt = this.rateLimitResetAt(res);
+        const resetsAt = fromUnixSeconds(resetAt).toISOString();
+        if (!canRetry) {
+          this.logRateLimitExhausted(attempt, res, resetsAt);
+          throw new RateLimitError(resetAt);
+        }
+        // Wait out the true window before the one allowed retry. A
+        // Retry-After guess could be 1s for a window that resets in
+        // minutes, spending another request against that same window.
+        await this.waitBeforeRetry(attempt, Math.max(0, resetAt * MS_PER_SECOND - Date.now()), {
+          limit: this.rateLimit?.limit ?? null,
+          remaining: this.rateLimit?.remaining ?? null,
+          resetsAt,
+          reason: "rate_limit",
+        });
+        waitedOutRateLimit = true;
+        continue;
+      }
+
+      if (res.status >= 500 && canRetry) {
+        await this.waitBeforeRetry(attempt, backoffMs(attempt.retries), {
+          status: res.status,
+          reason: "server_error",
+        });
+        continue;
+      }
+
+      throw new MastodonApiError(res.status, await safeJson(res));
+    }
+  }
+
+  private headers(init: RequestInit, effectId: string | null): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.token}`,
+      Accept: "application/json",
+      ...((init.headers as Record<string, string>) ?? {}),
+      ...(effectId ? { "Idempotency-Key": effectId } : {}),
+    };
+  }
+
+  /**
+   * The idempotency key of a write (null for a read), recorded as a pending
+   * effect in the outbox ledger when one is configured.
+   */
+  private openOutboxEffect(attempt: RequestAttempt, init: RequestInit, idempotencyKey?: string): string | null {
+    if (attempt.method === "GET") return null;
+    const effectId = idempotencyKey ?? (this.db ? randomUUID() : null);
+    if (this.db && effectId) {
+      const body = typeof init.body === "string" ? init.body : null;
+      createOutboxEffect(this.db, effectId, attempt.method as OutboxMethod, attempt.url, body);
+    }
+    return effectId;
+  }
+
+  /**
+   * Record the request's outcome in the ledger. Ledger failures are swallowed:
+   * they must not change the request's own outcome, and the pending row stays
+   * available for operator inspection.
+   */
+  private settleOutboxEffect(effectId: string | null, settle: (db: Db, id: string) => void): void {
+    if (!this.db || !effectId) return;
+    try {
+      settle(this.db, effectId);
+    } catch {
+      // See above: the request outcome wins over ledger bookkeeping.
+    }
+  }
+
+  /**
+   * A 429 carries the same X-RateLimit headers as a success (already tracked),
+   * and they describe the exhausted bucket; Retry-After is only the fallback.
+   */
+  private rateLimitResetAt(res: Response): number {
+    if (this.rateLimit) return this.rateLimit.resetAt;
+    const retryAfter = Number(res.headers.get("Retry-After") ?? DEFAULT_RATE_LIMIT_WINDOW_SEC);
+    return nowSec() + (Number.isFinite(retryAfter) ? retryAfter : DEFAULT_RATE_LIMIT_WINDOW_SEC);
+  }
+
+  private logRateLimitExhausted(attempt: RequestAttempt, res: Response, resetsAt: string): void {
+    this.log?.warn(
+      {
+        method: attempt.method,
+        path: attempt.path,
+        limit: this.rateLimit?.limit ?? null,
+        remaining: this.rateLimit?.remaining ?? null,
+        resetsAt,
+        retryAfterHeader: res.headers.get("Retry-After"),
+        resetHeader: res.headers.get("X-RateLimit-Reset"),
+      },
+      "mastodon rate limit exhausted",
+    );
+  }
+
+  private logFailure(attempt: RequestAttempt, err: unknown): void {
+    const { method, path } = attempt;
+    const durationMs = Date.now() - attempt.startedAt;
+    if (err instanceof RateLimitError) {
+      this.log?.warn({ method, path, resetAt: err.resetAt, durationMs }, "mastodon rate limit exhausted");
+      return;
+    }
+    this.log?.error(
+      { method, path, attempt: attempt.retries, durationMs, err: errorMessage(err) },
+      "mastodon request failed",
+    );
+  }
+
+  /** Log a retry with the backoff being waited out, then sleep for it. */
+  private async waitBeforeRetry(
+    attempt: RequestAttempt,
+    delayMs: number,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    this.log?.warn(
+      { method: attempt.method, path: attempt.path, attempt: attempt.retries + 1, delayMs, ...detail },
+      "mastodon request retry",
+    );
+    await sleep(delayMs);
   }
 
   private trackRateLimit(res: Response): void {
@@ -305,10 +332,15 @@ export class MastodonClient {
 
   private assertRateLimit(): void {
     const rl = this.rateLimit;
-    if (rl && rl.remaining <= 0 && rl.resetAt * 1000 > Date.now()) {
+    if (rl && rl.remaining <= 0 && rl.resetAt * MS_PER_SECOND > Date.now()) {
       throw new RateLimitError(rl.resetAt);
     }
   }
+}
+
+/** The rel="prev" URL of a Link header, if any. */
+function prevPageLink(link: string | null): string | null {
+  return link?.match(/<([^>]+)>;\s*rel="prev"/)?.[1] ?? null;
 }
 
 /**
@@ -325,7 +357,7 @@ function parseResetAt(raw: string | null): number | null {
   const asNumber = Number(raw);
   if (Number.isFinite(asNumber)) return asNumber;
   const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+  return Number.isFinite(parsed) ? toUnixSeconds(parsed) : null;
 }
 
 async function safeJson(res: Response): Promise<unknown> {
