@@ -254,17 +254,10 @@ type RoundRow = {
   resolution_json: string | null;
 };
 
-export function loadRound(
-  db: Db,
-  gameId: string,
-  roundNumber: number,
-): (RoundRow & { option_map: Record<string, unknown> }) | undefined {
-  const row = db
-    .prepare(
-      "SELECT status, winner_account_id, option_map_json, resolution_posted_at, resolution_json FROM rounds WHERE game_id = ? AND number = ?",
-    )
-    .get(gameId, roundNumber) as RoundRow | undefined;
-  if (!row) return undefined;
+const ROUND_COLUMNS = "status, winner_account_id, option_map_json, resolution_posted_at, resolution_json";
+
+/** Attach the parsed `option_map_json`, tolerating a malformed or empty value. */
+function withOptionMap(row: RoundRow): RoundRow & { option_map: Record<string, unknown> } {
   let optionMap: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(row.option_map_json || "{}");
@@ -273,6 +266,28 @@ export function loadRound(
     optionMap = {};
   }
   return { ...row, option_map: optionMap };
+}
+
+export function loadRound(
+  db: Db,
+  gameId: string,
+  roundNumber: number,
+): (RoundRow & { option_map: Record<string, unknown> }) | undefined {
+  const row = db
+    .prepare(`SELECT ${ROUND_COLUMNS} FROM rounds WHERE game_id = ? AND number = ?`)
+    .get(gameId, roundNumber) as RoundRow | undefined;
+  return row ? withOptionMap(row) : undefined;
+}
+
+/** Every round of the game in play order — one query where a round-by-round loop would issue N. */
+export function loadRounds(
+  db: Db,
+  gameId: string,
+): { number: number; row: RoundRow & { option_map: Record<string, unknown> } }[] {
+  const rows = db
+    .prepare(`SELECT number, ${ROUND_COLUMNS} FROM rounds WHERE game_id = ? ORDER BY number`)
+    .all(gameId) as (RoundRow & { number: number })[];
+  return rows.map((row) => ({ number: row.number, row: withOptionMap(row) }));
 }
 
 /**

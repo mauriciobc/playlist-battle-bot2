@@ -10,6 +10,7 @@ import {
   loadPlayers,
   loadTunes,
   loadRound,
+  loadRounds,
   loadRoundWinners,
   roundMeta,
   saveBattlePlaylistId,
@@ -52,9 +53,17 @@ export async function exclusively(key: string, task: () => Promise<void>): Promi
   }
 }
 
+/**
+ * A round is live while its game is in ROUND and still on that round. This is
+ * a guard, called several times per transition, so it asks SQLite for the
+ * answer instead of materializing the whole game row.
+ */
 function isLiveRound(db: Db, gameId: string, round: number): boolean {
-  const game = loadGame(db, gameId);
-  return game?.status === "ROUND" && game.currentRound === round;
+  return (
+    db
+      .prepare("SELECT 1 FROM games WHERE id = ? AND status = 'ROUND' AND current_round = ?")
+      .get(gameId, round) !== undefined
+  );
 }
 
 /**
@@ -104,9 +113,11 @@ async function emitRoundInner(handler: HandlerDeps, gameId: string, round: numbe
   if (!isLiveRound(db, gameId, round)) return;
 
   let excluded = new Set<string>();
-  const preliminaryEligible = eligibleForRound(loadPlayers(db, gameId), loadTunes(db, gameId), round);
+  const players = loadPlayers(db, gameId);
+  const tunes = loadTunes(db, gameId);
+  const preliminaryEligible = eligibleForRound(players, tunes, round);
   if (preliminaryEligible.length > 0) {
-    const windowOutcome = await ensureAvailability(handler, gameId, round, preliminaryEligible);
+    const windowOutcome = await ensureAvailability(handler, gameId, round, preliminaryEligible, tunes);
     if (windowOutcome.kind !== "ready") {
       // Aborted means the game went terminal (unreachable player → FORFEIT) —
       // never publish a round thread onto a void game.
@@ -313,10 +324,12 @@ async function ensureAvailability(
   gameId: string,
   round: number,
   eligibleIds: string[],
+  roundTunes: Tune[],
 ): Promise<AvailabilityOutcome> {
   const db = handler.db;
+  // Caller's snapshot: nothing writes tunes between its read and this call.
   const tunes = new Map<string, Tune>();
-  for (const t of loadTunes(db, gameId)) if (t.position === round) tunes.set(t.accountId, t);
+  for (const t of roundTunes) if (t.position === round) tunes.set(t.accountId, t);
   const deadIds = async (): Promise<string[]> => {
     const dead: string[] = [];
     for (const id of eligibleIds) {
@@ -409,9 +422,10 @@ async function emitFinaleInner(handler: HandlerDeps, gameId: string): Promise<vo
     return t ? [{ ...t, round: r.number }] : [];
   });
 
+  const roundRows = new Map(loadRounds(db, gameId).map((r) => [r.number, r.row]));
   const participated = new Set<string>();
   for (let round = 1; round <= game.playlistLength; round += 1) {
-    const row = loadRound(db, gameId, round);
+    const row = roundRows.get(round);
     if (!row) continue;
     const meta = roundMeta(row);
     if (Array.isArray(meta.participants)) {
@@ -433,7 +447,7 @@ async function emitFinaleInner(handler: HandlerDeps, gameId: string): Promise<vo
   );
 
   // v1.1 1.3: final-round tie splits the pot (persisted as finalSplit meta).
-  const finalRound = loadRound(db, gameId, game.playlistLength);
+  const finalRound = roundRows.get(game.playlistLength);
   const finalTied =
     !finalRound || finalRound.status === "auto_tied" || finalRound.winner_account_id === null;
   let potSplit: { total: number; each: number; count: number } | null = null;
