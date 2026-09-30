@@ -50,6 +50,12 @@ import {
   recoverRoundResult,
   recoverRoundResults,
 } from "./roundState.js";
+import { isoWeek, isoWeekStart } from "../time.js";
+import { outboxEffectStatus } from "../db/outbox.js";
+import { boardActivity, latestClosedGame } from "../db/merit.js";
+import { shouldPublishBoard } from "../game/merit.js";
+import { boardText } from "../handlers/meritView.js";
+import { postLeaderboard } from "../mastodon/posts.js";
 
 type EarlyCloseConfig = {
   enabled: boolean;
@@ -433,8 +439,48 @@ export async function resumeOpenGames(deps: SchedulerDeps): Promise<void> {
   const readyStuck = await startStuckReadyGames(handler);
   const inFlightRounds = await resumeInFlightRounds(handler);
   const stuckFinales = await resumeStuckFinales(handler);
+  await sweepLeaderboard(handler, handler.now());
 
   handler.logger?.debug({ readyStuck, inFlightRounds, stuckFinales }, "game recovery sweep complete");
+}
+
+/**
+ * The weekly board, once per ISO week, into the most recent duel's thread.
+ *
+ * Two gates keep it from becoming noise. The outbox already records which
+ * logical posts exist, so asking it is enough to know this week is done — no
+ * second ledger to disagree. And a quiet week is skipped entirely: a board with
+ * nobody on it says the bot is alive while showing nobody anything, which is
+ * the worst thing a weekly post can do on a personal account.
+ *
+ * Runs on the recovery loop. A weekly post does not justify a fifth
+ * `LOOP_LABELS` heartbeat, and leaving that list alone keeps `healthcheck.ts`
+ * correct for free.
+ */
+export async function sweepLeaderboard(handler: HandlerDeps, now: Date): Promise<boolean> {
+  const week = isoWeek(now);
+  const key = `pb:v1:leaderboard:${week}`;
+  // Only a landed (or possibly-landed) post closes the week. A `failed` one
+  // must stay retryable, or one transient 500 silently loses that week's board
+  // — which is exactly the sort of quiet gap this feature is meant to avoid.
+  const prior = outboxEffectStatus(handler.db, key);
+  if (prior === "sent" || prior === "unknown") return false;
+  const since = isoWeekStart(now).toISOString();
+  const activity = boardActivity(handler.db, since);
+  if (!shouldPublishBoard(activity)) {
+    handler.logger?.debug({ ...activity, week }, "leaderboard skipped: quiet week");
+    return false;
+  }
+
+  const latest = latestClosedGame(handler.db);
+  if (latest === null || latest.threadRootId === null) {
+    handler.logger?.debug({ week }, "leaderboard skipped: no duel thread to reply into");
+    return false;
+  }
+
+  await postLeaderboard(handler.client, boardText(handler.db, now, "wins"), latest.threadRootId, week);
+  handler.logger?.info({ week, ...activity }, "leaderboard posted");
+  return true;
 }
 
 /** READY games that finished collection but never emitted round 1. Returns how many. */

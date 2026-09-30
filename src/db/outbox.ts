@@ -7,6 +7,20 @@ import type { Db } from "./index.js";
 
 export type OutboxMethod = "POST" | "DELETE";
 
+/**
+ * Status of a recorded effect, or null when the key was never used.
+ *
+ * The leaderboard reads this to decide whether it has already posted for the
+ * current week: the outbox already knows which logical posts exist, so this
+ * needs no separate ledger that could disagree with it.
+ */
+export function outboxEffectStatus(db: Db, id: string): string | null {
+  const row = db.prepare("SELECT status FROM outbox_effects WHERE id = ?").get(id) as
+    | { status: string }
+    | undefined;
+  return row?.status ?? null;
+}
+
 export function createOutboxEffect(
   db: Db,
   id: string,

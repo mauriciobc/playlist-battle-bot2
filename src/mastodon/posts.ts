@@ -302,6 +302,27 @@ export async function postBadges(
   return posted.id;
 }
 
+/**
+ * The weekly board, posted as a reply into the most recent duel's thread.
+ *
+ * A reply rather than a fresh root: that reaches the people already following
+ * the game instead of broadcasting to every follower of a personal account.
+ * The pull path covers everyone else, and costs them no attention.
+ */
+export async function postLeaderboard(
+  client: MastodonClient,
+  text: string,
+  inReplyToId: string,
+  week: string,
+): Promise<string> {
+  const posted = await postStatus(
+    client,
+    { status: truncate(text), in_reply_to_id: inReplyToId },
+    { idempotencyKey: `pb:v1:leaderboard:${week}` },
+  );
+  return posted.id;
+}
+
 export type SideEffectKind = "expired" | "fizzled" | "forfeit" | "cancelled" | "default_win";
 
 const SIDE_EFFECT_COPY: Record<SideEffectKind, (g: Game, winnerAcct?: string) => string> = {
