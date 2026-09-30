@@ -94,7 +94,13 @@ describe("database migrations", () => {
     expect(columns(legacy, "players")).not.toContain("display_name");
     // The upgrade keeps the rows it was given.
     expect(legacy.prepare("SELECT acct, points FROM players").get()).toEqual({ acct: "a1", points: 3 });
-    expect(schemaVersionOf(legacy)).toBe(16);
+    // v16 is recorded again because deleting it from the ledger is what makes
+    // the runner replay it. Asserting the head version instead would break on
+    // every future migration, which says nothing about this upgrade path.
+    const applied = (
+      legacy.prepare("SELECT version FROM schema_migrations WHERE version = 16").all()
+    ) as { version: number }[];
+    expect(applied).toEqual([{ version: 16 }]);
     legacy.close();
   });
 
