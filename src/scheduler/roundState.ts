@@ -14,6 +14,7 @@ import { awardPoints, loadPlayers } from "../db/players.js";
 import { loadTunes } from "../db/tunes.js";
 import {
   awardNewBadges,
+  awardedBadges,
   awardsForGame,
   insertGameResult,
   insertParticipants,
@@ -47,6 +48,7 @@ import {
   type PostRoundResult,
   type TallyInput,
 } from "../mastodon/posts.js";
+import { dmBadges } from "../mastodon/dm.js";
 import {
   eligibleForRound,
   hasRoundCollision,
@@ -535,6 +537,25 @@ async function emitClaimedFinale(handler: HandlerDeps, gameId: string): Promise<
   const awards = awardsForGame(db, gameId);
   if (awards.length > 0) {
     await postBadges(handler.client, awards, summaryId, gameId);
+  }
+
+  // The private half. Best-effort by contract: a player with DMs from strangers
+  // off, or a deleted account, must not stop the game from closing — the public
+  // reply above already announced them.
+  for (const award of awards) {
+    try {
+      await dmBadges(handler, {
+        accountId: award.accountId,
+        acct: award.acct,
+        badges: award.badges,
+        heldTotal: awardedBadges(db, award.accountId).size,
+      });
+    } catch (err) {
+      handler.logger?.warn(
+        { accountId: award.accountId, gameId, err: errorMessage(err) },
+        "badge DM failed; the public achievement reply still stands",
+      );
+    }
   }
 
   setGameStatus(db, gameId, "FINALE", "CLOSED", at);

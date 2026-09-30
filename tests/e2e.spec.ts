@@ -71,8 +71,11 @@ describe("simulated full-game E2E", () => {
     expect(playerRow(h.db, GAME, "id-host").points).toBe(8 * 5);
     expect(playerRow(h.db, GAME, "id-alice").points).toBe(8 * 3);
 
-    // finale: a new root post naming the theme and the champion
-    const finale = h.posts.filter((p) => !p.body.in_reply_to_id).at(-1)!.body.status;
+    // Public root posts only: the merit system also DMs its achievement notice,
+    // and that is a root post with direct visibility.
+    const finale = h.posts
+      .filter((p) => !p.body.in_reply_to_id && p.body.visibility !== "direct")
+      .at(-1)!.body.status;
     expect(finale).toContain("80s Synth");
     expect(finale).toContain(m().champion("@host"));
 

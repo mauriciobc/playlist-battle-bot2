@@ -174,7 +174,9 @@ describe("checkPolls — poll expiry tally (PRD §5.5/§5.6)", () => {
     await checkPolls(h.sched);
 
     expect(gameRow(h.db, id).status).toBe("CLOSED");
-    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id);
+    // Public root posts only: the merit system DMs its achievement notice, and
+    // that is a root post with direct visibility.
+    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id && p.body.visibility !== "direct");
     expect(rootPosts.at(-1)!.body.status).toContain(m().champion("@host1"));
     expect(pointsOf(id, "host1")).toBe(10 + 5 + 3); // prior + final votes + pot
   });
@@ -252,7 +254,8 @@ describe("resumeOpenGames — crash recovery (PRD §7)", () => {
     expect(gameRow(h.db, id).status).toBe("CLOSED");
     expect(roundRow(h.db, id, 8)!.resolution_posted_at).toBeTruthy();
     expect(h.texts().join("\n")).toMatch(/Round 8/);
-    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id);
+    // Public root posts only — the merit achievement DM is a direct root.
+    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id && p.body.visibility !== "direct");
     expect(rootPosts.at(-1)!.body.status).toContain(m().champion("@host1"));
   });
 
