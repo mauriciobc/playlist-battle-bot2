@@ -104,6 +104,7 @@ export function createHarness(opts: HarnessOpts = {}): Harness {
     submissionWindowSec: 172800,
     creationCooldownSec: 600,
     maxGamesPerPlayer: 3,
+    announceMaxAttempts: 8,
     lookup: vi.fn(async (acct: string) => ({ id: `id-${acct.split("@")[0]!}`, acct })),
     resolveTitle: vi.fn(async (videoId: string) => ({
       videoId,

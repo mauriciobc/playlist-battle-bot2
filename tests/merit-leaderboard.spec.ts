@@ -24,13 +24,15 @@ async function closeDuel(h: Harness, id: string, extraPlayer?: string, closedAt:
 }
 
 /**
- * A week busy enough to clear the anti-void gate: two duels closed and three
+ * A week busy enough to clear the anti-void gate: three duels closed and four
  * distinct players. `seedDuel` only ever yields host1 and alice, so the third
  * player is added explicitly.
  */
 async function seedBusyWeek(h: Harness): Promise<void> {
   await closeDuel(h, "w1", "carol");
   await closeDuel(h, "w2", "dave");
+  // The board's floor is 3 duels, so the winner needs a third to be ranked.
+  await closeDuel(h, "w3", "erin");
 }
 
 function boardPosts(h: Harness) {
@@ -57,6 +59,17 @@ describe("isoWeek", () => {
 });
 
 describe("sweepLeaderboard", () => {
+  it("retries after a refused post even though the board text changed", async () => {
+    const h = createHarness();
+    await seedBusyWeek(h);
+    h.db
+      .prepare("INSERT INTO outbox_effects (id, method, path, body_json, status, attempts, created_at, updated_at) VALUES (?, 'POST', '/x', '{\"old\":1}', 'failed', 1, ?, ?)")
+      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}:old`, NOW, NOW);
+
+    expect(await sweepLeaderboard(h.deps, MONDAY)).toBe(true);
+    h.db.close();
+  });
+
   it("posts once into the most recent duel's thread", async () => {
     const h = createHarness();
     await seedBusyWeek(h);
@@ -66,7 +79,7 @@ describe("sweepLeaderboard", () => {
     expect(posted).toBe(true);
     expect(boardPosts(h)).toHaveLength(1);
     expect(h.posts.find((p) => /Ranking|Classificação/.test(String(p.body.status)))!.body).toMatchObject({
-      in_reply_to_id: "root-w2",
+      in_reply_to_id: "root-w3",
     });
     h.db.close();
   });
@@ -81,7 +94,7 @@ describe("sweepLeaderboard", () => {
     // by recording the week's effect the way a landed post would.
     h.db
       .prepare("INSERT INTO outbox_effects (id, method, path, body_json, status, attempts, created_at, updated_at) VALUES (?, 'POST', '/x', NULL, 'sent', 0, ?, ?)")
-      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}`, NOW, NOW);
+      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}:abc123`, NOW, NOW);
 
     expect(await sweepLeaderboard(h.deps, MONDAY)).toBe(false);
     expect(await sweepLeaderboard(h.deps, new Date("2026-10-01T10:00:00.000Z"))).toBe(false);
@@ -94,7 +107,7 @@ describe("sweepLeaderboard", () => {
     await seedBusyWeek(h);
     h.db
       .prepare("INSERT INTO outbox_effects (id, method, path, body_json, status, attempts, created_at, updated_at) VALUES (?, 'POST', '/x', NULL, 'failed', 1, ?, ?)")
-      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}`, NOW, NOW);
+      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}:abc123`, NOW, NOW);
 
     // A refused post must not close the week for good.
     expect(await sweepLeaderboard(h.deps, MONDAY)).toBe(true);
@@ -109,7 +122,7 @@ describe("sweepLeaderboard", () => {
     await closeDuel(h, "n2", "dave", next);
     h.db
       .prepare("INSERT INTO outbox_effects (id, method, path, body_json, status, attempts, created_at, updated_at) VALUES (?, 'POST', '/x', NULL, 'sent', 0, ?, ?)")
-      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}`, NOW, NOW);
+      .run(`pb:v1:leaderboard:${isoWeek(MONDAY)}:abc123`, NOW, NOW);
 
     // A new week is a new key, so it gets its own board — but only once that
     // week has activity of its own to show.
@@ -180,6 +193,18 @@ describe("leaderboard post", () => {
     for (const post of boardPosts(h)) {
       expect(String(post.body.status).length).toBeLessThanOrEqual(500);
     }
+    h.db.close();
+  });
+});
+
+describe("sweepLeaderboard floor", () => {
+  it("skips when the gate passes but nobody has 3 duels yet", async () => {
+    const h = createHarness();
+    await closeDuel(h, "w1", "carol");
+    await closeDuel(h, "w2", "dave");
+
+    expect(await sweepLeaderboard(h.deps, MONDAY)).toBe(false);
+    expect(boardPosts(h)).toHaveLength(0);
     h.db.close();
   });
 });

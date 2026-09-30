@@ -25,20 +25,25 @@ Rules are implemented as a pure domain layer — no I/O, no Mastodon, no DB:
 | Playlist length N | 8–12 tunes, fixed at creation |
 | Instance | Same-instance or federated — any account may host, play, or vote (Mastodon counts remote poll votes) |
 | Duplicates | The same account twice (or a challenger equal to the host) is rejected; the same video twice inside your own playlist is rejected |
-| Entry | `@bot newgame "<theme>" 8–12 @challenger…` as a public mention. The host is auto-accepted. Themes are limited to 120 characters. |
-| Challenger reply | DM `accept` or `decline` |
-| Submission | DM one YouTube link per line; line order is the play order; re-submit freely until all accepted playlists are complete, at which point the duel locks and starts; DM `replace <n> <url>` swaps tune n before the lock (last write wins) |
+| Entry | `@bot newgame "<theme>" 8–12 @challenger…` as a public mention. The host is auto-accepted. Themes are limited to 120 characters. Handles follow Mastodon's convention: a bare `@name` is an account on the bot's instance, anything else is `@name@domain`; `@name@<bot's instance>` is the same account as `@name`, so duplicates collapse. A remote mention is read from the status's `mentions` array, because the rendered text drops its domain. The bot writes every mention the same way (`src/mastodon/handle.ts`): `@name` for a local account, `@name@domain` for a remote one, in posts and DMs alike |
+| Challenger reply | DM `accept` or `decline`. A declined challenger is out of the duel; the game continues with the rest. When no challenger is left pending or accepted (a two-player game's only challenger, or every challenger of a larger one, declined) the game closes at once as `EXPIRED` |
+| Submission | DM one or more YouTube links per message (separated by lines, spaces or commas; send order is the play order; rejected links — unplayable, duplicate, playlist full — are listed in one note while the rest are kept); re-submit freely until the duel locks and starts; DM `replace <n> <url>` swaps tune n before the lock (last write wins). When a player's playlist becomes complete, the bot DMs every other accepted player (who finished, how many are still to go). The duel locks once **no invite is still pending** (every challenger accepted or declined, or the acceptance window closed and auto-declined the silent ones) and every accepted playlist is complete |
 | Rate limits | 10-minute creation cooldown per host; max 3 concurrent non-terminal games per player (as host or participant) |
 
 ## 2. Windows
 
 | Window | Env var | Default |
 | --- | --- | --- |
-| Acceptance (challengers reply) | `ACCEPTANCE_WINDOW_SEC` | 24 h |
-| Submission (playlists) | `SUBMISSION_WINDOW_SEC` | 48 h |
-| Poll duration (global, manager-set) | `POLL_DURATION_SEC` | 15 min, clamped to 5 min–7 days |
+| Acceptance (challengers reply); silent invitees are auto-declined when it closes | `ACCEPTANCE_WINDOW_SEC` | 30 min |
+| Submission (playlists), from the first accept | `SUBMISSION_WINDOW_SEC` | 24 h |
+| Poll duration (hard cap on a round; global, manager-set) | `POLL_DURATION_SEC` | 4 h, clamped to 5 min–7 days |
+| Early close: age of a poll that reached quorum | `EARLY_CLOSE_MIN_AGE_SEC` | 15 min |
+| Early close: votes unchanged for | `EARLY_CLOSE_STAGNATION_SEC` | 15 min |
+| Early close: age of a poll still below quorum | `EARLY_CLOSE_UNDER_QUORUM_MIN_AGE_SEC` | 1 h |
 
-Worst-case game length is `acceptance + submission + (N × (poll + replacement)) + scheduling overhead` (N = 12 max playlist length, overhead = 2 extra poll durations). If the instance auto-delete window (`AUTO_DELETE_WINDOW_HOURS`) is shorter than that, the bot logs a loud warning at boot — posts can vanish mid-duel and the game will break.
+**Round length.** A poll rarely runs to its cap. With at least 3 votes (the quorum) it closes once it is 15 min old and its votes have been still for 15 min. A poll below quorum could only score a tie, so it is given 1 h for voters to arrive before it closes; an unvoted poll therefore lives 1 h, not 5 min. Each new vote restarts the 15 min clock, and the 4 h cap ends the round regardless. A duel starts as soon as no invite is pending and every accepted player's playlist is complete, without waiting for the submission window.
+
+Worst-case game length is `acceptance + submission + (N × (poll + replacement)) + scheduling overhead` (N = 12 max playlist length, overhead = 2 extra poll durations). This is a bound, not an expectation: the submission window starts at the first accept and overlaps the acceptance window, and early close ends most rounds in well under the cap. If the instance auto-delete window (`AUTO_DELETE_WINDOW_HOURS`) is shorter than that bound, the bot logs a loud warning at boot — posts can vanish mid-duel and the game will break.
 
 ## 3. Duel mechanics
 
@@ -60,7 +65,7 @@ Worst-case game length is `acceptance + submission + (N × (poll + replacement))
 | Pot split | A tied final round divides the pre-round pot equally among the tied players (integer division, remainder discarded; announced in the finale) — the pot never grows on a final tie. If the tie is quorum-forced (fewer than 3 votes) with a unique leader, *every* poll participant shares the pot, not just the leader. A final round that yields no eligible poll participants zeroes the pot |
 | Default win | Exactly one complete playlist at the submission deadline — no duel, straight to FINALE |
 | FIZZLED | Zero complete playlists at the deadline (partials withdraw) |
-| EXPIRED | No challenger accepted within the acceptance window |
+| EXPIRED | No challenger accepted within the acceptance window, or every invited challenger declined |
 | FORFEIT | A player account was deleted or became unreachable — closed with no champion. Precedence: deletion always causes FORFEIT (no champion), even if it would leave exactly one eligible player; walkovers never result from player disappearance. A still-open round poll is closed and its poll status removed, so no votes can land on a void game |
 | CANCELLED | The host DM'd `cancel` while the game was open — voids the game: no champion, no pot; scores are historical record only. Any live round poll is closed and its poll status removed, so no votes can land on a void game. Cancellable states are exactly `CLOSURES.CANCEL` in `src/handlers/closure.ts`: CREATED, INVITED, COLLECTING, ROUND (a READY game is mid-transition and a FINALE game is already posting its outcome) |
 
@@ -74,7 +79,7 @@ stateDiagram-v2
   CREATED --> INVITED: invite DMs sent
   CREATED --> CANCELLED
   INVITED --> COLLECTING: first accept
-  INVITED --> EXPIRED: window closed, nobody accepted
+  INVITED --> EXPIRED: window closed with nobody accepted, or every challenger declined
   COLLECTING --> READY: deadline, two or more complete playlists
   COLLECTING --> FINALE: deadline, exactly one complete
   COLLECTING --> FIZZLED: deadline, zero complete
@@ -98,7 +103,7 @@ stateDiagram-v2
 | Public | `@bot badges` (or `conquistas`) — the asker's own record |
 | DM | `ranking` / `badges` — the same two views, privately |
 | DM | `accept` / `decline` |
-| DM | One YouTube link per line (playlist order = play order); plain link during a replacement window replaces the round's tune |
+| DM | One or more YouTube links per message (playlist order = send order); plain link during a replacement window replaces the round's tune (only the first link is used) |
 | DM | `replace <n> <url>` — swap tune n before the submission deadline, or the current round's tune while its replacement window is open |
 | DM | `cancel` — host voids an open game (no champion, no pot; scores are historical record only) |
 
@@ -181,9 +186,21 @@ in play takes back. Streak badges are awarded once and kept.
 | Channel | What |
 | --- | --- |
 | Finale thread | One reply naming who unlocked what. Up to four mentions, so one notification per player — the mention is what carries it |
-| DM | The same awards plus the running total. Best-effort: a refused DM never stops the duel closing |
+| DM | The same awards plus the running total. Delivered from the same queue, one row per player |
 | On demand | `@bot ranking` / `@bot badges`, public or by DM |
 
-The finale writes merit, awards badges, and flips `FINALE → CLOSED` last, so a
-resumed finale can still re-enter. The reply reads the badge ledger rather than
-the award return value, because a replay finds nothing new to award.
+The finale writes merit, awards badges, queues the announcements
+(`merit_announcements`) and flips `FINALE → CLOSED` in one transaction, so a
+crash leaves either a still-open finale that re-runs or a closed game with its
+announcements queued. Announcements read the badge ledger rather than the award
+return value, because a replay finds nothing new to award.
+
+Delivery never keeps a game open. The first attempt runs right after the close;
+failures retry from the recovery loop with backoff (1 min, doubling, capped at
+6 h) up to `MERIT_ANNOUNCE_MAX_ATTEMPTS` (default 8). Each row is independent —
+a refused DM does not hold back the thread reply. A refusal a retry cannot fix
+(4xx other than 408/429, e.g. the finale post was deleted) is abandoned at once.
+Abandoned rows are logged at `warn`; the badge stays recorded and `@bot badges`
+still shows it.
+
+A duel in which nobody scored has no champion: it counts as played, not won.

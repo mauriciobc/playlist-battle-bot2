@@ -222,6 +222,32 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       CREATE INDEX idx_badges_awarded ON badges(awarded_at);
     `,
   },
+  {
+    version: 18,
+    // Merit announcement queue. One row per delivery (the thread reply, and one
+    // DM per awarded player), written in the finale transaction that closes the
+    // game, so an announcement can never be lost to a crash and a failing post
+    // can never keep a game open. `account_id` is '' for the thread row so the
+    // primary key needs no NULL. `reply_to_id` is the finale summary the thread
+    // reply answers. Delivery state lives here, not in the outbox: Mastodon only
+    // honours an Idempotency-Key for about an hour, so this table is the
+    // authority on what was delivered.
+    sql: `
+      CREATE TABLE merit_announcements (
+        game_id TEXT NOT NULL REFERENCES games(id),
+        kind TEXT NOT NULL,
+        account_id TEXT NOT NULL DEFAULT '',
+        reply_to_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (game_id, kind, account_id)
+      );
+      CREATE INDEX idx_merit_announcements_due ON merit_announcements(status, next_attempt_at);
+    `,
+  },
 ];
 
 /**

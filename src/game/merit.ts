@@ -7,8 +7,6 @@
  * drift from the games that earned it.
  */
 
-import type { Player } from "./types.js";
-
 /** A closed duel, as recorded by the finale snapshot. */
 export type DuelRecord = {
   gameId: string;
@@ -190,10 +188,4 @@ export function rankBoard(
  */
 export function shouldPublishBoard(input: { closedDuels: number; distinctPlayers: number }): boolean {
   return input.closedDuels >= 2 && input.distinctPlayers >= 3;
-}
-
-
-/** One player's final points in a duel, for the results snapshot. */
-export function finalPoints(players: readonly Player[], accountId: string): number {
-  return players.find((p) => p.accountId === accountId)?.points ?? 0;
 }

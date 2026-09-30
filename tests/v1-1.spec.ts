@@ -194,7 +194,7 @@ describe("availability window (v1.1 1.4)", () => {
     const meta = JSON.parse(String(round.option_map_json)) as { replacement: { notified: string[] } };
     expect(meta.replacement.notified).toEqual(["id-alice"]);
     expect(h.posts.filter((p) => p.body.visibility === "direct").map((p) => p.body.status!.split(" ")[0])).toEqual([
-      "@alice@mastodon.example",
+      "@alice",
     ]);
   });
 

@@ -1,3 +1,4 @@
+import type { StatusMention } from "../mastodon/handle.js";
 import type { Db } from "../db/index.js";
 import type { MastodonClient } from "../mastodon/client.js";
 import type { PublicVisibility } from "../mastodon/notifications.js";
@@ -16,6 +17,8 @@ export type HandlerDeps = {
   submissionWindowSec: number;
   creationCooldownSec: number;
   maxGamesPerPlayer: number;
+  /** Delivery attempts per merit announcement before it is abandoned. */
+  announceMaxAttempts: number;
   lookup: (acct: string) => Promise<{ id: string; acct: string }>;
   resolveTitle: (videoId: string) => Promise<ResolvedTune>;
   /** Live availability check for a video (never reads the title cache). */
@@ -52,6 +55,8 @@ export type CommandInput = {
   content: string;
   inReplyToId: string | null;
   visibility?: PublicVisibility;
+  /** The status's `mentions` array: the only place a remote mention keeps its domain. */
+  mentions?: readonly StatusMention[];
 };
 
 export type Handled = { handled: true; kind: string; detail?: unknown };

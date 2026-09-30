@@ -16,6 +16,7 @@ describe("badge DM", () => {
   it("names the badges and the running total", async () => {
     const h = createHarness();
     await dmBadges(h.deps, {
+      gameId: "g1",
       accountId: "a",
       acct: "alice",
       badges: ["debut", "first_blood"],
@@ -31,11 +32,11 @@ describe("badge DM", () => {
     h.db.close();
   });
 
-  it("addresses a local account with its instance-qualified handle", async () => {
+  it("addresses a local account with its bare handle", async () => {
     const h = createHarness();
-    await dmBadges(h.deps, { accountId: "a", acct: "alice", badges: ["debut"], heldTotal: 1 });
+    await dmBadges(h.deps, { gameId: "g1", accountId: "a", acct: "alice", badges: ["debut"], heldTotal: 1 });
 
-    expect(String(h.posts.at(-1)!.body.status)).toMatch(/^@alice@mastodon\.example /);
+    expect(String(h.posts.at(-1)!.body.status)).toMatch(/^@alice /);
     h.db.close();
   });
 });
@@ -51,8 +52,8 @@ describe("finale DMs every awarded player", () => {
     const dms = h.posts.filter((p) => p.body.visibility === "direct");
     expect(dms).toHaveLength(2);
     expect(dms.map((d) => String(d.body.status).match(/^@(\S+)/)![1]).sort()).toEqual([
-      "alice@mastodon.example",
-      "host1@mastodon.example",
+      "alice",
+      "host1",
     ]);
     h.db.close();
   });

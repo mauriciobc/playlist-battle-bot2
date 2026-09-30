@@ -36,6 +36,7 @@ type CommandFields = {
   accountAcct: string;
   content: string;
   inReplyToId: string | null;
+  mentions: { username: string; acct: string }[];
 };
 
 export type Classified =
@@ -61,6 +62,7 @@ export function classifyNotification(n: RawNotification, botAcct: string): Class
     accountAcct: n.account.acct,
     content: n.status.content,
     inReplyToId: n.status.in_reply_to_id,
+    mentions: n.status.mentions,
   };
 
   const { visibility } = n.status;

@@ -164,3 +164,12 @@ describe("ranking surfaces", () => {
     h.db.close();
   });
 });
+
+describe("ranking word boundary", () => {
+  it("does not treat a longer word as the command", () => {
+    expect(parseDmReply("rankings of the 80s").kind).not.toBe("ranking");
+    expect(parseDmReply("classificados").kind).not.toBe("ranking");
+    expect(parseMeritCommand("@playlistbattle rankings", "playlistbattle")).toBeNull();
+    expect(parseDmReply("classificação")).toEqual({ kind: "ranking" });
+  });
+});

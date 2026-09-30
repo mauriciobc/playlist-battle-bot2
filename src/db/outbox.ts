@@ -8,17 +8,19 @@ import type { Db } from "./index.js";
 export type OutboxMethod = "POST" | "DELETE";
 
 /**
- * Status of a recorded effect, or null when the key was never used.
+ * Whether any effect whose id starts with `prefix` landed (`sent`) or may have
+ * (`unknown`). A `failed` effect does not count: the caller may try again.
  *
  * The leaderboard reads this to decide whether it has already posted for the
  * current week: the outbox already knows which logical posts exist, so this
  * needs no separate ledger that could disagree with it.
  */
-export function outboxEffectStatus(db: Db, id: string): string | null {
-  const row = db.prepare("SELECT status FROM outbox_effects WHERE id = ?").get(id) as
-    | { status: string }
-    | undefined;
-  return row?.status ?? null;
+export function outboxLanded(db: Db, prefix: string): boolean {
+  const escaped = prefix.replace(/[\\%_]/g, "\\$&");
+  const row = db
+    .prepare("SELECT 1 AS ok FROM outbox_effects WHERE id LIKE ? ESCAPE '\\' AND status IN ('sent','unknown') LIMIT 1")
+    .get(`${escaped}%`);
+  return row !== undefined;
 }
 
 export function createOutboxEffect(

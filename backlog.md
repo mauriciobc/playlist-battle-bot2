@@ -242,35 +242,31 @@ Worth setting before the leaderboard ships.
 
 ## Game pacing
 
-Raised while designing the above, not yet scoped. Notes for later.
+Most of this was done; what remains is below.
 
-An 8-round duel at current settings (`ACCEPTANCE_WINDOW_SEC=86400`,
-`SUBMISSION_WINDOW_SEC=172800`, `POLL_DURATION_SEC=86400`) runs ~11 days; a
-12-round duel ~15. That is a season, not a game, and it breaks the merit system
-above — streaks and any badge ladder assume the game is remembered.
+What was wrong: an unvoted poll closed 5 minutes after opening (a zero-vote poll
+counted as "stagnant since it opened"), scored as a tie by `ROUND_QUORUM=3`, so
+voters on a federated instance never had time to vote and duels tended to end in
+a chain of ties. Nominal windows (24 h accept + 48 h submit + 24 h polls) were
+also far longer than any round actually ran. The earlier note here claiming "one
+vote at hour 20 keeps a poll open another day" was wrong for the same reason: an
+unvoted poll never lived that long.
 
-The poll ceiling is not really the problem: `EARLY_CLOSE_ENABLED=1` closes a
-poll ~5 min after votes stop moving. The problem is one person voting at hour
-20, which keeps the poll open for another day. Repeated across 8 rounds, the
-duel pays the tail instead of the median. The windows are sized for tardiness,
-and tardiness is unbounded.
+Now: polls are capped at 4 h, a poll below quorum is held open 1 h, a poll at
+quorum closes 15 min after its last vote, acceptance is 12 h and submission 24 h
+from the first accept. See RULES.md §2.
 
-- `playlist_length` currently sets both the submission burden (8–12 links) and
-  the round count. Decoupling them — submit 10–12 tracks, play a sample of ~4
-  rounds — cuts tail exposure ~3× without touching curation effort.
-  `rounds_played` becomes a tuning knob. Needs a `CHECK` constraint change and a
-  RULES.md rewrite.
-- `ROUND_QUORUM=3` fights short polls. A duel that cannot reach 3 votes resolves
-  as a chain of ties ending in a pot split. Decide the quorum policy before
-  shortening polls, or fast games end unwon.
-- Do **not** simply cut the acceptance window to 2h. On mastodon.social
-  notification delivery is slow and buried; a 2h window likely expires before
-  the DM is surfaced, converting a slow game into a reliably dead one. The
-  channel is the problem, not the clock. Cheaper fixes first: re-ping the
-  challenger once mid-window (the machinery already exists — `invite_sent_at`),
-  and allow accepting by public reply in the thread. The real fix is not gating
-  on acceptance at all, which is a state-machine change.
+Still open:
 
-The one recorded game shows the shape of this: acceptance deadline
-`09-23T01:53:44Z`, transition to `EXPIRED` at `09-23T19:58:47Z` — 18 hours past
-deadline, with a 24h window and one silent challenger.
+- `playlist_length` sets both the submission burden (8–12 links) and the round
+  count. Decoupling them — submit 10–12 tracks, play ~4–6 rounds — would shorten
+  a duel without touching curation effort. Needs a `CHECK` constraint change and
+  a RULES.md rewrite.
+- Do **not** simply cut the acceptance window to 2 h. On mastodon.social
+  notification delivery is slow and buried; a short window likely expires before
+  the DM is surfaced. Cheaper fixes first: re-ping the challenger once
+  mid-window (`invite_sent_at` exists), and allow accepting by public reply in
+  the thread.
+- The open-poll check is one GET per poll per scheduler sweep (60 s). Cheap at
+  current volume; throttle it (e.g. every 2–5 min once a poll is 30 min old) if
+  many concurrent games start hitting the instance's rate limit.

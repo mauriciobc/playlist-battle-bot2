@@ -264,6 +264,7 @@ export class Harness {
       acceptanceWindowSec: ACCEPTANCE_WINDOW_SEC,
       submissionWindowSec: SUBMISSION_WINDOW_SEC,
       creationCooldownSec: 600,
+      announceMaxAttempts: 8,
       maxGamesPerPlayer: 3,
       lookup: async (acct) => ({ id: `id-${acct}`, acct }),
       resolveTitle: async (videoId) => ({
@@ -890,7 +891,7 @@ export const SCENARIOS: Scenario[] = [
       await h.submit("host");
       h.advanceSec(SUBMISSION_WINDOW_SEC + 86400);
       await h.sweep("deadlines");
-      h.expectTerminal("CLOSED", m().sideDefaultWin("Solo Act", "host"));
+      h.expectTerminal("CLOSED", m().sideDefaultWin("Solo Act", "@host"));
       h.expectPollCount(0);
       h.expectFinale();
     },

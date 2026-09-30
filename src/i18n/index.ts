@@ -69,9 +69,9 @@ const en = {
     `Length: ${length} tunes · Players: ${players}\n` +
     `Challengers invited — accept via DM by ${deadline}.\n` +
     `Game ID: ${gameId}`,
-  inviteDm: (theme: string, hostAcct: string, length: number, deadline: string) =>
+  inviteDm: (theme: string, hostHandle: string, length: number, deadline: string) =>
     `You're invited to duel "${theme}"!\n` +
-    `Host: @${hostAcct}\n` +
+    `Host: ${hostHandle}\n` +
     `Playlist length: ${length}\n` +
     `Accept deadline: ${deadline}\n` +
     `Reply "accept" or "decline".`,
@@ -84,8 +84,8 @@ const en = {
   statusLabelGameId: () => "Game ID",
   gameStatus: (status: string, round: number, total: number) => (status === "ROUND" ? `ROUND ${round}/${total}` : status),
   statusPoints: (points: number) => `${points}p`,
-  unknownDm: (botAcct: string) =>
-    `I didn't understand that. Send "accept"/"decline"/"cancel", or a YouTube link for your tune. To start a game, mention me publicly: @${botAcct} newgame "<theme>" 8-12 @friend`,
+  unknownDm: (botHandle: string) =>
+    `I didn't understand that. Send "accept"/"decline"/"cancel", or a YouTube link for your tune. To start a game, mention me publicly: ${botHandle} newgame "<theme>" 8-12 @friend`,
   noInvitation: () => "No pending invitation found for you.",
   cancelDone: (theme: string) =>
     `🚫 Game "${theme}" cancelled — no champion, no pot. Scores stay as historical record.`,
@@ -103,8 +103,13 @@ const en = {
     `✅ Tune ${pos}/${len}: ${title}\nPlaylist complete!`,
   tuneAcceptedMore: (pos: number, len: number, title: string, next: number) =>
     `✅ Tune ${pos}/${len}: ${title}\nSend tune ${next} of ${len}.`,
+  playlistFinished: (handle: string, len: number, waiting: number) =>
+    `🎧 ${handle} finished their ${len}-tune playlist. ` +
+    (waiting > 0 ? `Still waiting on ${waiting} more.` : "Every accepted playlist is in."),
   resolveVideoError: () => "Could not resolve that video.",
   linkRejected: () => "That link was rejected.",
+  linksSkipped: (reasons: string[]) =>
+    `⚠️ ${reasons.length} link(s) skipped:\n${reasons.map((r) => `• ${r}`).join("\n")}`,
   tuneReplaced: (pos: number, len: number, title: string) =>
     `🔁 Replaced tune ${pos}/${len}: ${title}`,
   replaceTuneDm: (pos: number, round: number, title: string, deadline: string) =>
@@ -122,17 +127,17 @@ const en = {
     `Vote for the song that best fits the theme: "${theme}"\n` +
     `Standings: ${standings}\n` +
     `Pot: ${pot} · Players this round: ${playing}`,
-  tuneLine: (acct: string, title: string) => `🎵 @${acct} — ${title}`,
+  tuneLine: (handle: string, title: string) => `🎵 ${handle} — ${title}`,
   pollPrompt: (round: number) =>
     `🗳️ Vote for the best tune in Round ${round}! Anyone can vote.`,
-  resolutionWalkover: (round: number, acct: string, pot: number) =>
-    `🚶 Round ${round}: walkover — @${acct} wins unopposed and takes the pot (+${pot}).`,
+  resolutionWalkover: (round: number, handle: string, pot: number) =>
+    `🚶 Round ${round}: walkover — ${handle} wins unopposed and takes the pot (+${pot}).`,
   resolutionTie: (round: number, newPot: number) =>
     `🤝 Round ${round}: TIE — no winner. Pot grows to ${newPot}.`,
   resolutionFinalTie: (round: number, total: number, each: number) =>
     `🤝 Round ${round}: FINAL TIE — pot of ${total} split ${each} point(s) among the tied players.`,
-  resolutionWin: (round: number, acct: string, bonus: number) =>
-    `🏆 Round ${round}: @${acct} wins!${bonus > 0 ? ` + pot bonus ${bonus}` : ""}`,
+  resolutionWin: (round: number, handle: string, bonus: number) =>
+    `🏆 Round ${round}: ${handle} wins!${bonus > 0 ? ` + pot bonus ${bonus}` : ""}`,
   standingsLine: (standings: string) => `Standings: ${standings}`,
   potLine: (pot: number) => `Pot: ${pot}`,
   sharedChampionship: (handles: string) => `🏆 Shared championship: ${handles}!`,
@@ -143,20 +148,22 @@ const en = {
     `Final-round tie: pot of ${total} split ${each} point(s) each among ${count} tied player(s) (remainder discarded).`,
   finaleDuelLink: (threadId: string) => `Full duel: reply chain root ${threadId}`,
   finaleQueue: () => "▶️ Whole battle, in order:",
-  finaleWinningTune: (round: number, acct: string, title: string) => `🎵 Round ${round} winner @${acct} — ${title}`,
+  finaleWinningTune: (round: number, handle: string, title: string) => `🎵 Round ${round} winner ${handle} — ${title}`,
   /** YouTube Music playlist metadata for the battle (saved-playlist path). */
   playlistTitle: (theme: string, rounds: number) => `Playlist Battle — ${theme} (${rounds} rounds)`,
   playlistDescription: (theme: string, rounds: number) =>
     `Round winners of a Playlist Battle on the theme "${theme}" (${rounds} rounds).`,
   sideExpired: (theme: string) =>
     `⌛ Game "${theme}" expired — no challenger accepted the invitation in time.`,
+  sideDeclined: (theme: string) =>
+    `🙅 Game "${theme}" closed — every invited challenger declined.`,
   sideFizzled: (theme: string) =>
     `💨 Game "${theme}" fizzled — no complete playlists were submitted before the deadline.`,
   sideForfeit: (theme: string) =>
     `⚠️ Game "${theme}" closed — a player account was deleted or unreachable. No champion crowned.`,
   sideCancelled: (theme: string) => `🚫 Game "${theme}" cancelled by host.`,
-  sideDefaultWin: (theme: string, winnerAcct: string) =>
-    `🎖️ Game "${theme}": only one complete playlist — @${winnerAcct} wins by default (last one standing)!`,
+  sideDefaultWin: (theme: string, winnerHandle: string) =>
+    `🎖️ Game "${theme}": only one complete playlist — ${winnerHandle} wins by default (last one standing)!`,
 
   // merit.ts
   badgeName: (id: BadgeId) => EN_BADGES[id],
@@ -167,14 +174,14 @@ const en = {
   badgeDmNone: () => "You have no new achievements yet — finish a duel to start.",
   badgeDmTotal: (held: number) => `You now hold ${held} achievement(s).`,
   boardHeader: (since: string) => `🏆 Ranking · ${since}`,
-  boardRow: (place: number, acct: string, score: string) => `${place}. @${acct} — ${score}`,
+  boardRow: (place: number, handle: string, score: string) => `${place}. ${handle} — ${score}`,
   boardEmpty: () => "No duels have closed yet — the board is empty.",
   boardFloor: () => "Needs at least 3 duels to rank.",
   boardWins: (n: number) => `${n} wins`,
   boardDuels: (n: number) => `${n} duels`,
   boardYourRank: (place: number, of: number) => `You are #${place} of ${of}.`,
   boardUnranked: () => "You are not on the board yet.",
-  playerHeader: (acct: string) => `🏅 @${acct}`,
+  playerHeader: (handle: string) => `🏅 ${handle}`,
   playerNoBadges: () => "No achievements yet. Finish a duel to start.",
   playerStats: (wins: number, duels: number, streak: number) =>
     `${duels} duels · ${wins} wins · best run ${streak}`,
@@ -256,9 +263,9 @@ const ptBR: Messages = {
     `Tamanho: ${length} faixas · Jogadores: ${players}\n` +
     `Desafiadores convidados — aceite por DM até ${deadline}.\n` +
     `ID do jogo: ${gameId}`,
-  inviteDm: (theme, hostAcct, length, deadline) =>
+  inviteDm: (theme, hostHandle, length, deadline) =>
     `Você foi convidado para o duelo "${theme}"!\n` +
-    `Anfitrião: @${hostAcct}\n` +
+    `Anfitrião: ${hostHandle}\n` +
     `Tamanho da playlist: ${length}\n` +
     `Prazo para aceitar: ${deadline}\n` +
     `Responda "accept" ou "decline".`,
@@ -272,8 +279,8 @@ const ptBR: Messages = {
   gameStatus: (status, round, total) =>
     status === "ROUND" ? `RODADA ${round}/${total}` : (PT_BR_STATUS[status] ?? status),
   statusPoints: (points) => `${points} pts`,
-  unknownDm: (botAcct) =>
-    `Não entendi. Envie "accept"/"decline"/"cancel", ou um link do YouTube com sua faixa. Para iniciar um jogo, me mencione publicamente: @${botAcct} newgame "<tema>" 8-12 @amigo`,
+  unknownDm: (botHandle) =>
+    `Não entendi. Envie "accept"/"decline"/"cancel", ou um link do YouTube com sua faixa. Para iniciar um jogo, me mencione publicamente: ${botHandle} newgame "<tema>" 8-12 @amigo`,
   noInvitation: () => "Nenhum convite pendente encontrado para você.",
   cancelDone: (theme) =>
     `🚫 Jogo "${theme}" cancelado — sem campeão, sem pote. As pontuações ficam apenas como registro histórico.`,
@@ -291,8 +298,13 @@ const ptBR: Messages = {
     `✅ Faixa ${pos}/${len}: ${title}\nPlaylist completa!`,
   tuneAcceptedMore: (pos, len, title, next) =>
     `✅ Faixa ${pos}/${len}: ${title}\nEnvie a faixa ${next} de ${len}.`,
+  playlistFinished: (handle, len, waiting) =>
+    `🎧 ${handle} terminou a playlist de ${len} faixas. ` +
+    (waiting > 0 ? `Ainda faltam ${waiting}.` : "Todas as playlists aceitas estão prontas."),
   resolveVideoError: () => "Não foi possível resolver esse vídeo.",
   linkRejected: () => "Esse link foi rejeitado.",
+  linksSkipped: (reasons) =>
+    `⚠️ ${reasons.length} link(s) ignorado(s):\n${reasons.map((r) => `• ${r}`).join("\n")}`,
   tuneReplaced: (pos, len, title) =>
     `🔁 Faixa ${pos}/${len} substituída: ${title}`,
   replaceTuneDm: (pos, round, title, deadline) =>
@@ -309,17 +321,17 @@ const ptBR: Messages = {
     `Vote na faixa que melhor combina com o tema: "${theme}"\n` +
     `Placar: ${standings}\n` +
     `Pote: ${pot} · Jogadores nesta rodada: ${playing}`,
-  tuneLine: (acct, title) => `🎵 @${acct} — ${title}`,
+  tuneLine: (handle, title) => `🎵 ${handle} — ${title}`,
   pollPrompt: (round) =>
     `🗳️ Vote na melhor faixa da Rodada ${round}! Qualquer pessoa pode votar.`,
-  resolutionWalkover: (round, acct, pot) =>
-    `🚶 Rodada ${round}: W.O. — @${acct} vence sem oposição e leva o pote (+${pot}).`,
+  resolutionWalkover: (round, handle, pot) =>
+    `🚶 Rodada ${round}: W.O. — ${handle} vence sem oposição e leva o pote (+${pot}).`,
   resolutionTie: (round, newPot) =>
     `🤝 Rodada ${round}: EMPATE — sem vencedor. O pote sobe para ${newPot}.`,
   resolutionFinalTie: (round, total, each) =>
     `🤝 Rodada ${round}: EMPATE NA FINAL — pote de ${total} dividido em ${each} ponto(s) para cada jogador empatado.`,
-  resolutionWin: (round, acct, bonus) =>
-    `🏆 Rodada ${round}: @${acct} venceu!${bonus > 0 ? ` + bônus do pote ${bonus}` : ""}`,
+  resolutionWin: (round, handle, bonus) =>
+    `🏆 Rodada ${round}: ${handle} venceu!${bonus > 0 ? ` + bônus do pote ${bonus}` : ""}`,
   standingsLine: (standings) => `Placar: ${standings}`,
   potLine: (pot) => `Pote: ${pot}`,
   sharedChampionship: (handles) => `🏆 Campeonato compartilhado: ${handles}!`,
@@ -330,19 +342,21 @@ const ptBR: Messages = {
     `Empate na rodada final: pote de ${total} dividido em ${each} ponto(s) cada entre ${count} jogador(es) empatado(s) (sobra descartada).`,
   finaleDuelLink: (threadId) => `Duelo completo: raiz da cadeia de respostas ${threadId}`,
   finaleQueue: () => "▶️ Batalha completa, na ordem:",
-  finaleWinningTune: (round, acct, title) => `🎵 Vencedor da rodada ${round} @${acct} — ${title}`,
+  finaleWinningTune: (round, handle, title) => `🎵 Vencedor da rodada ${round} ${handle} — ${title}`,
   playlistTitle: (theme, rounds) => `Batalha de Playlists — ${theme} (${rounds} rodadas)`,
   playlistDescription: (theme, rounds) =>
     `Vencedores das rodadas de uma Batalha de Playlists com o tema "${theme}" (${rounds} rodadas).`,
   sideExpired: (theme) =>
     `⌛ Jogo "${theme}" expirou — nenhum desafiante aceitou o convite a tempo.`,
+  sideDeclined: (theme) =>
+    `🙅 Jogo "${theme}" encerrado — todos os desafiantes convidados recusaram.`,
   sideFizzled: (theme) =>
     `💨 Jogo "${theme}" esvaziou — nenhuma playlist completa foi enviada antes do prazo.`,
   sideForfeit: (theme) =>
     `⚠️ Jogo "${theme}" encerrado — a conta de um jogador foi excluída ou está inacessível. Sem campeão coroado.`,
   sideCancelled: (theme) => `🚫 Jogo "${theme}" cancelado pelo anfitrião.`,
-  sideDefaultWin: (theme, winnerAcct) =>
-    `🎖️ Jogo "${theme}": apenas uma playlist completa — @${winnerAcct} vence por padrão (o último em pé)!`,
+  sideDefaultWin: (theme, winnerHandle) =>
+    `🎖️ Jogo "${theme}": apenas uma playlist completa — ${winnerHandle} vence por padrão (o último em pé)!`,
 
   // merit.ts
   badgeName: (id) => PT_BR_BADGES[id],
@@ -353,14 +367,14 @@ const ptBR: Messages = {
   badgeDmNone: () => "Você ainda não tem conquistas — conclua um duelo para começar.",
   badgeDmTotal: (held) => `Agora você tem ${held} conquista(s).`,
   boardHeader: (since) => `🏆 Classificação · ${since}`,
-  boardRow: (place, acct, score) => `${place}. @${acct} — ${score}`,
+  boardRow: (place, handle, score) => `${place}. ${handle} — ${score}`,
   boardEmpty: () => "Nenhum duelo terminou ainda — a classificação está vazia.",
   boardFloor: () => "Precisa de pelo menos 3 duelos para entrar.",
   boardWins: (n) => `${n} ${n === 1 ? "vitória" : "vitórias"}`,
   boardDuels: (n) => `${n} ${n === 1 ? "duelo" : "duelos"}`,
   boardYourRank: (place, of) => `Você está em #${place} de ${of}.`,
   boardUnranked: () => "Você ainda não está na classificação.",
-  playerHeader: (acct) => `🏅 @${acct}`,
+  playerHeader: (handle) => `🏅 ${handle}`,
   playerNoBadges: () => "Nenhuma conquista ainda. Conclua um duelo para começar.",
   playerStats: (wins, duels, streak) =>
     `${duels} ${duels === 1 ? "duelo" : "duelos"} · ${wins} ${wins === 1 ? "vitória" : "vitórias"} · melhor sequência ${streak}`,

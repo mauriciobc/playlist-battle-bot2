@@ -8,6 +8,7 @@ import { LOOP_LABELS, touchLoopHeartbeat, type LoopLabel } from "./db/heartbeats
 import { releasePendingNotificationClaims } from "./db/notifications.js";
 import { markPendingOutboxEffectsUnknown } from "./db/outbox.js";
 import { MastodonClient, RateLimitError } from "./mastodon/client.js";
+import { resolveLocalDomain } from "./mastodon/handle.js";
 import { initializeNotificationCursor, pollNotifications } from "./mastodon/poller.js";
 import {
   checkDeadlines,
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
     log,
   });
   const me = await verifyBotAccount(client, config.botAcct);
+  const instanceDomain = await resolveLocalDomain(client, log);
   const unknownEffects = markPendingOutboxEffectsUnknown(db);
   if (unknownEffects > 0) {
     log.warn({ unknownEffects }, "outbox effects marked unknown after restart; inspect before retrying");
@@ -63,13 +65,14 @@ async function main(): Promise<void> {
     );
   }
 
-  const deps = createHandlerDeps(config, db, client, log);
+  const deps = createHandlerDeps(config, db, client, log, instanceDomain);
   const scheduler: SchedulerDeps = {
     handler: deps,
     earlyClose: {
       enabled: config.earlyCloseEnabled,
       minAgeSec: config.earlyCloseMinAgeSec,
       stagnationSec: config.earlyCloseStagnationSec,
+      underQuorumMinAgeSec: config.earlyCloseUnderQuorumMinAgeSec,
     },
   };
   // Fast path for poll-expiry notifications (breaks handler → scheduler import cycle)
@@ -95,6 +98,7 @@ async function main(): Promise<void> {
       runMode: config.runMode,
       earlyCloseMinAgeSec: config.earlyCloseMinAgeSec,
       earlyCloseStagnationSec: config.earlyCloseStagnationSec,
+      earlyCloseUnderQuorumMinAgeSec: config.earlyCloseUnderQuorumMinAgeSec,
       schedulerIntervalSec: config.schedulerIntervalSec,
       logLevel: logSettings.level,
       logPretty: logSettings.pretty,
@@ -118,17 +122,18 @@ async function verifyBotAccount(client: MastodonClient, botAcct: string): Promis
   return me;
 }
 
-function createHandlerDeps(config: BotConfig, db: Db, client: MastodonClient, log: Logger): HandlerDeps {
+function createHandlerDeps(config: BotConfig, db: Db, client: MastodonClient, log: Logger, instanceDomain: string): HandlerDeps {
   return {
     db,
     client,
     botAcct: config.botAcct,
-    instanceDomain: new URL(config.mastodonUrl).hostname,
+    instanceDomain,
     pollDurationSec: config.pollDurationSec,
     acceptanceWindowSec: config.acceptanceWindowSec,
     submissionWindowSec: config.submissionWindowSec,
     creationCooldownSec: config.creationCooldownSec,
     maxGamesPerPlayer: config.maxGamesPerPlayer,
+    announceMaxAttempts: config.announceMaxAttempts,
     lookup: (acct: string) =>
       client.get<{ id: string; acct: string }>(`/api/v1/accounts/lookup?acct=${encodeURIComponent(acct)}`),
     resolveTitle: (videoId: string) => resolveTitle(videoId, { db }),

@@ -3,14 +3,12 @@ import { openDatabase, migrate, type Db } from "../src/db/index.js";
 import {
   awardNewBadges,
   boardActivity,
-  boardPosition,
   insertGameResult,
   insertParticipants,
   latestClosedGame,
   loadBoard,
   loadCareer,
   markGameClosed,
-  meritAcct,
 } from "../src/db/merit.js";
 import { setGameStatus } from "../src/db/games.js";
 import { seedGame, seedPlayer } from "./support.js";
@@ -64,9 +62,10 @@ describe("merit migration", () => {
   });
 
   it("is idempotent across repeated migrate calls", () => {
+    const version = () => (db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number }).v;
+    const before = version();
     expect(() => migrate(db)).not.toThrow();
-    const v = db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number };
-    expect(v.v).toBe(17);
+    expect(version()).toBe(before);
   });
 });
 
@@ -289,30 +288,8 @@ describe("loadBoard", () => {
     expect(loadBoard(db, "wins", { minDuels: 3 }).map((e) => e.accountId)).toEqual(["c"]);
   });
 
-  it("reports a 1-based position, and null when unranked", () => {
-    expect(boardPosition(db, "a", "wins")).toBe(1);
-    expect(boardPosition(db, "b", "wins")).toBe(2);
-    expect(boardPosition(db, "nobody", "wins")).toBeNull();
-  });
-
   it("summarises period activity for the anti-void gate", () => {
     expect(boardActivity(db, "2026-01-01T00:00:00.000Z")).toEqual({ closedDuels: 2, distinctPlayers: 2 });
-  });
-});
-
-describe("meritAcct", () => {
-  it("is null for a stranger", () => {
-    expect(meritAcct(db, "nobody")).toBeNull();
-  });
-
-  it("returns the recorded handle", () => {
-    closedDuel({
-      id: "g1",
-      closedAt: "2026-01-01T00:00:00.000Z",
-      players: [dueler("a", "host", 5, "alice@remote.social")],
-      champions: ["a"],
-    });
-    expect(meritAcct(db, "a")).toBe("alice@remote.social");
   });
 });
 
@@ -354,5 +331,25 @@ describe("closed-game bookkeeping", () => {
     setGameStatus(db, "c1", "COLLECTING", "CANCELLED", new Date("2026-01-01T00:00:00.000Z"));
     const row = db.prepare("SELECT COUNT(*) AS c FROM game_results WHERE game_id = 'c1'").get() as { c: number };
     expect(row.c).toBe(0);
+  });
+});
+
+describe("merit regressions", () => {
+  it("marathon goes to a player who reached the final round without winning", () => {
+    const players = [dueler("a", "host", 5), dueler("b", "challenger", 1)];
+    closedDuel({ id: "g1", closedAt: "2026-09-01T10:00:00.000Z", players, champions: ["a"] });
+    db.prepare("INSERT INTO rounds (game_id, number, status) VALUES (?, (SELECT playlist_length FROM games WHERE id = ?), 'resolved')").run("g1", "g1");
+
+    expect(loadCareer(db, "b").playedToFinalRound).toBe(true);
+  });
+
+  it("one board row per account even when its handle changed", () => {
+    closedDuel({ id: "g1", closedAt: "2026-09-01T10:00:00.000Z", players: [dueler("a", "host", 5, "old@x.social"), dueler("b", "challenger", 1)], champions: ["a"] });
+    closedDuel({ id: "g2", closedAt: "2026-09-02T10:00:00.000Z", players: [dueler("a", "host", 5, "new@x.social"), dueler("b", "challenger", 1)], champions: ["a"] });
+
+    const board = loadBoard(db, "wins");
+    expect(board.filter((e) => e.accountId === "a")).toEqual([
+      expect.objectContaining({ wins: 2, duels: 2, acct: "new@x.social" }),
+    ]);
   });
 });

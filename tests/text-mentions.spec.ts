@@ -36,7 +36,7 @@ describe("mentions parsed from the status text", () => {
     const n = await notifications(server);
     expect(n.length).toBe(1);
     expect(n[0]?.type).toBe("mention");
-    expect((n[0]?.account as Json).acct).toBe("host@mock.social");
+    expect((n[0]?.account as Json).acct).toBe("host");
     await server.stop();
   });
 

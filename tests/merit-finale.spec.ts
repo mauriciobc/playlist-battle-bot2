@@ -58,16 +58,22 @@ describe("finale records merit", () => {
     expect(crowned).toHaveLength(1);
   });
 
-  it("crowns both on a shared championship, as scoring.champions does", async () => {
-    // The all-zero case: every round tied, so the pot zeroes and nobody leads.
-    // Re-deriving a champion from points alone would have crowned everyone;
-    // reading the recorded outcome keeps this an honest shared crown.
-    const gameId = seedFinale({ points: [0, 0] });
+  it("crowns both on a shared, scoring championship", async () => {
+    const gameId = seedFinale({ points: [4, 4] });
 
     await emitFinale(h.deps, gameId);
 
     const crowned = participantsFor(gameId).filter((p) => p.was_champion === 1);
     expect(crowned).toHaveLength(2);
+    expect(resultsFor(gameId)).toHaveLength(1);
+  });
+
+  it("crowns nobody when no one scored: a void duel earns no wins", async () => {
+    const gameId = seedFinale({ points: [0, 0] });
+
+    await emitFinale(h.deps, gameId);
+
+    expect(participantsFor(gameId).filter((p) => p.was_champion === 1)).toHaveLength(0);
     expect(resultsFor(gameId)).toHaveLength(1);
   });
 

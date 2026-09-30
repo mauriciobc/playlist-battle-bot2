@@ -37,7 +37,7 @@ describe("status mentions array (REST::StatusSerializer)", () => {
     expect(mentions.length).toBe(1);
     // MentionSerializer attributes: :id, :username, :url, :acct
     expect(mentions[0]?.username).toBe("bot");
-    expect(mentions[0]?.acct).toBe("bot@mock.social");
+    expect(mentions[0]?.acct).toBe("bot"); // MentionSerializer → pretty_acct: bare when local
     expect(typeof mentions[0]?.id).toBe("string");
     expect(mentions[0]?.url).toBeDefined();
     await server.stop();

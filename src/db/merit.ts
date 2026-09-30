@@ -161,7 +161,6 @@ function playedToFinalRound(db: Db, accountId: string): boolean {
       `SELECT 1 AS ok FROM game_participants p
          JOIN games g ON g.id = p.game_id
         WHERE p.account_id = ? AND g.closed_at IS NOT NULL
-          AND p.was_champion = 1
           AND EXISTS (SELECT 1 FROM rounds r WHERE r.game_id = p.game_id AND r.number = g.playlist_length)
         LIMIT 1`,
     )
@@ -242,24 +241,17 @@ export function awardsForGame(db: Db, gameId: string): AwardedBadges[] {
   return [...grouped.values()];
 }
 
-/** Account handle last recorded for an account, or null for a stranger. */
-export function meritAcct(db: Db, accountId: string): string | null {
-  const row = db
-    .prepare("SELECT acct FROM game_participants WHERE account_id = ? ORDER BY rowid LIMIT 1")
-    .get(accountId) as { acct: string } | undefined;
-  return row?.acct ?? null;
-}
-
 /** Every ranked board row, before metric selection. */
 function boardEntries(db: Db, since: string | null): BoardEntry[] {
   const rows = db
     .prepare(
-      `SELECT p.account_id AS accountId, p.acct AS acct,
+      `SELECT p.account_id AS accountId,
+              (SELECT q.acct FROM game_participants q WHERE q.account_id = p.account_id ORDER BY q.rowid DESC LIMIT 1) AS acct,
               SUM(p.was_champion) AS wins, COUNT(*) AS duels
          FROM game_participants p
          JOIN game_results r ON r.game_id = p.game_id
         WHERE (? IS NULL OR r.closed_at >= ?)
-        GROUP BY p.account_id, p.acct`,
+        GROUP BY p.account_id`,
     )
     .all(since, since) as { accountId: string; acct: string; wins: number; duels: number }[];
   return rows.map((r) => ({ ...r, wins: Number(r.wins), duels: Number(r.duels) }));
@@ -275,18 +267,6 @@ export function loadBoard(
   opts: { since?: string | null; minDuels?: number } = {},
 ): BoardEntry[] {
   return rankBoard(boardEntries(db, opts.since ?? null), metric, opts.minDuels ?? 0);
-}
-
-/** One account's position on a board: 1-based, or null when unranked. */
-export function boardPosition(
-  db: Db,
-  accountId: string,
-  metric: BoardMetric,
-  opts: { since?: string | null; minDuels?: number } = {},
-): number | null {
-  const board = loadBoard(db, metric, opts);
-  const index = board.findIndex((e) => e.accountId === accountId);
-  return index === -1 ? null : index + 1;
 }
 
 /** Games closed and distinct players since a moment — the anti-void gate. */

@@ -12,9 +12,10 @@ import {
 } from "../db/games.js";
 import { awardPoints, loadPlayers } from "../db/players.js";
 import { loadTunes } from "../db/tunes.js";
+import { enqueueAnnouncement } from "../db/announcements.js";
+import { drainAnnouncements } from "./announcements.js";
 import {
   awardNewBadges,
-  awardedBadges,
   awardsForGame,
   insertGameResult,
   insertParticipants,
@@ -44,11 +45,9 @@ import {
   postRound,
   postRoundResolution,
   postFinale,
-  postBadges,
   type PostRoundResult,
   type TallyInput,
 } from "../mastodon/posts.js";
-import { dmBadges } from "../mastodon/dm.js";
 import {
   eligibleForRound,
   hasRoundCollision,
@@ -521,44 +520,31 @@ async function emitClaimedFinale(handler: HandlerDeps, gameId: string): Promise<
     queueUrl,
   });
 
-  // Merit is recorded before the status flip and read back from the ledger,
-  // never from a return value: a resumed finale finds nothing "new" to award,
-  // so an announcement derived from the return value would post nothing on
-  // recovery. Leaving the game in FINALE until every post has landed keeps
-  // that recovery path open — a closed game is never revisited.
+  // Merit and the game's close are one transaction, and the announcements are
+  // only *queued* in it. A crash leaves either nothing (the game is still in
+  // FINALE and this block runs again) or everything (closed, with the queue
+  // holding what is owed) — and a post that cannot be delivered never keeps a
+  // game open. Announcements read the badge ledger, never a return value, so a
+  // resumed finale finds the same awards.
   const at = handler.now();
   db.transaction(() => {
     markGameClosed(db, gameId, at);
-    insertGameResult(db, { gameId, theme: game.theme, closedAt: at.toISOString(), champions: crowned });
-    insertParticipants(db, gameId, duelers, crowned);
+    // champions() crowns everyone when nobody scored; a duel with no points
+    // has no winner, so it earns no wins.
+    const winners = duelers.some((p) => p.points > 0) ? crowned : [];
+    insertGameResult(db, { gameId, theme: game.theme, closedAt: at.toISOString(), champions: winners });
+    insertParticipants(db, gameId, duelers, winners);
     for (const player of duelers) awardNewBadges(db, player.accountId, gameId, at);
+
+    const awards = awardsForGame(db, gameId);
+    if (awards.length > 0) enqueueAnnouncement(db, { gameId, kind: "thread", replyToId: summaryId }, at);
+    for (const award of awards) enqueueAnnouncement(db, { gameId, kind: "dm", accountId: award.accountId }, at);
+    setGameStatus(db, gameId, "FINALE", "CLOSED", at);
   })();
 
-  const awards = awardsForGame(db, gameId);
-  if (awards.length > 0) {
-    await postBadges(handler.client, awards, summaryId, gameId);
-  }
-
-  // The private half. Best-effort by contract: a player with DMs from strangers
-  // off, or a deleted account, must not stop the game from closing — the public
-  // reply above already announced them.
-  for (const award of awards) {
-    try {
-      await dmBadges(handler, {
-        accountId: award.accountId,
-        acct: award.acct,
-        badges: award.badges,
-        heldTotal: awardedBadges(db, award.accountId).size,
-      });
-    } catch (err) {
-      handler.logger?.warn(
-        { accountId: award.accountId, gameId, err: errorMessage(err) },
-        "badge DM failed; the public achievement reply still stands",
-      );
-    }
-  }
-
-  setGameStatus(db, gameId, "FINALE", "CLOSED", at);
+  // First attempt right away, so the usual case is as prompt as a direct post.
+  // Anything that fails retries from the recovery loop.
+  await drainAnnouncements(handler, gameId);
 }
 
 function roundWinningTunes(db: Db, gameId: string, tunes: Tune[]): WinningTune[] {

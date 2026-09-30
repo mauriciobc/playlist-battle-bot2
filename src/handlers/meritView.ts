@@ -9,6 +9,7 @@ import {
 } from "../game/merit.js";
 import { loadBoard, loadCareer, awardedBadges } from "../db/merit.js";
 import type { Db } from "../db/index.js";
+import { mention } from "../mastodon/handle.js";
 
 /**
  * The pull path: everything the merit system can be asked for on demand.
@@ -37,7 +38,7 @@ function windowLabel(now: Date): string {
  * is also why a young board can legitimately be empty — an empty board says
  * "play more", which is honest, where a 1-1 record at the top would not be.
  */
-export function boardText(db: Db, now: Date, metric: BoardMetric = "wins"): string {
+export function boardText(db: Db, now: Date, metric: BoardMetric = "wins", instanceDomain?: string): string {
   const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const board = loadBoard(db, metric, { since, minDuels: BOARD_MIN_DUELS });
 
@@ -48,18 +49,24 @@ export function boardText(db: Db, now: Date, metric: BoardMetric = "wins"): stri
   }
 
   const rows = board.slice(0, BOARD_ROWS).map((e, i) =>
-    m().boardRow(i + 1, e.acct, metric === "wins" ? m().boardWins(e.wins) : m().boardDuels(e.duels)),
+    m().boardRow(i + 1, mention(e.acct, instanceDomain), metric === "wins" ? m().boardWins(e.wins) : m().boardDuels(e.duels)),
   );
   const overflow = board.length - rows.length;
   const body = overflow > 0 ? m().boardListOverflow(overflow) : "";
   return truncate([m().boardHeader(windowLabel(now)), ...rows, body].filter(Boolean).join("\n"), POST_LIMIT);
 }
 
+/** Whether the board has anyone to show; false means "play more", not news. */
+export function boardHasRows(db: Db, now: Date, metric: BoardMetric = "wins"): boolean {
+  const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  return loadBoard(db, metric, { since, minDuels: BOARD_MIN_DUELS }).length > 0;
+}
+
 /** One player's record: badges held, plus the career line behind them. */
-export function playerText(db: Db, accountId: string, acct: string): string {
+export function playerText(db: Db, accountId: string, acct: string, instanceDomain?: string): string {
   const career = loadCareer(db, accountId);
   const held = [...awardedBadges(db, accountId)] as BadgeId[];
-  const header = m().playerHeader(acct);
+  const header = m().playerHeader(mention(acct, instanceDomain));
 
   if (held.length === 0) {
     return [header, m().playerNoBadges()].join("\n");
@@ -79,8 +86,8 @@ export function playerText(db: Db, accountId: string, acct: string): string {
 }
 
 /** The board, plus where the asker stands on it. */
-export function rankingTextFor(db: Db, accountId: string, acct: string, now: Date): string {
-  const board = boardText(db, now);
+export function rankingTextFor(db: Db, accountId: string, acct: string, now: Date, instanceDomain?: string): string {
+  const board = boardText(db, now, "wins", instanceDomain);
   const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const placing = loadBoard(db, "wins", { since, minDuels: BOARD_MIN_DUELS });
   const index = placing.findIndex((e: BoardEntry) => e.accountId === accountId);

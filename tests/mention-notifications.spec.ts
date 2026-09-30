@@ -46,7 +46,7 @@ describe("mention notifications", () => {
     expect(n.created_at).toBeDefined();
     expect(n.group_key).toBeDefined();
     // belongs_to :from_account, key: :account
-    expect((n.account as Json).acct).toBe("host@mock.social");
+    expect((n.account as Json).acct).toBe("host"); // Account#acct: bare for a local account
     // belongs_to :target_status, key: :status, if: :status_type?
     expect(n.status).toBeDefined();
   });
