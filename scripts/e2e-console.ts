@@ -676,14 +676,30 @@ export class Harness {
       this.check(`finale never crowns withdrawn @${p.acct}`, !text.includes(`@${p.acct}`), flat);
     }
     // The finale replies with the battle link first (only when publishing
-    // worked), then one reply per winning round.
+    // worked), then one reply per winning round, then the achievement reply.
     const link = this.playlistLink;
     const replies = this.posts.filter((p) => p.body.in_reply_to_id === summary.id);
-    const expectedReplies = this.ledger.winners + (link ? 1 : 0);
+    const badgeHeader = m().badgeListHeader();
+    const isBadges = (p: (typeof replies)[number]) =>
+      String(p.body.status ?? "").startsWith(badgeHeader);
+    const isLink = (p: (typeof replies)[number]) => Boolean(link) && String(p.body.status ?? "").includes(link!.url);
+    // Counted by content, not position: the merit reply is a legitimate extra
+    // reply, and this check is about there being one reply per winning round.
+    const tuneReplies = replies.filter((p) => !isBadges(p) && !isLink(p));
+    const expectedReplies = this.ledger.winners;
     this.check(
       "finale tune replies match ledger winners",
-      replies.length === expectedReplies,
-      `${replies.length} replies vs ${expectedReplies} expected for ${this.ledger.winners} winning rounds`,
+      tuneReplies.length === expectedReplies,
+      `${tuneReplies.length} replies vs ${expectedReplies} expected for ${this.ledger.winners} winning rounds`,
+    );
+    const badgesReplies = replies.filter(isBadges);
+    this.check(
+      "finale carries an achievement reply naming every dueler",
+      badgesReplies.length === 1 &&
+        duelers.every((p) =>
+          badgesReplies.some((r) => String(r.body.status ?? "").includes(`@${p.acct}`)),
+        ),
+      badgesReplies.map((r) => String(r.body.status ?? "").replace(/\n/g, " | ")).join(" // "),
     );
     if (link) {
       const queueReply = replies.find((p) => String(p.body.status ?? "").includes(link.url));
