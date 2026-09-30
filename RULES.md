@@ -11,6 +11,7 @@ Rules are implemented as a pure domain layer — no I/O, no Mastodon, no DB:
 | Points, pot, standings, ties | `src/game/scoring.ts` |
 | Eligibility, round collision detection | `src/game/types.ts` |
 | Rate limits | `src/game/rateLimit.ts` |
+| Merit: badges, win streaks, board ranking | `src/game/merit.ts` (pure), `src/db/merit.ts` (snapshot + queries) |
 | Round emission (poll / auto-tie / walkover) | `src/scheduler/roundState.ts` |
 | Command syntax | `src/handlers/commands.ts` |
 | Player-facing copy (EN / pt-BR) | `src/i18n/index.ts` |
@@ -93,9 +94,96 @@ stateDiagram-v2
 | --- | --- |
 | Public reply/mention | `@bot newgame "<theme>" 8–12 @challenger [@challenger…]` |
 | Public | `@bot status` |
+| Public | `@bot ranking` (or `classificacao`) — the 30-day board plus the asker's position |
+| Public | `@bot badges` (or `conquistas`) — the asker's own record |
+| DM | `ranking` / `badges` — the same two views, privately |
 | DM | `accept` / `decline` |
 | DM | One YouTube link per line (playlist order = play order); plain link during a replacement window replaces the round's tune |
 | DM | `replace <n> <url>` — swap tune n before the submission deadline, or the current round's tune while its replacement window is open |
 | DM | `cancel` — host voids an open game (no champion, no pot; scores are historical record only) |
 
 All player-facing copy is bilingual (`LOCALE=en` or `pt-BR`). See README §Commands for the abbreviated table and §Configuration for the full env reference.
+
+## 7. Merit
+
+Achievements and the leaderboard read a per-duel snapshot written once at the
+finale, never an accumulator. Career totals are therefore always derivable, and
+a badge can never drift from the games that earned it.
+
+### 7.1 What counts
+
+| Game status | Counts as | Why |
+| --- | --- | --- |
+| `CLOSED` | full | a real duel with a champion |
+| `CANCELLED` | participation only | RULES §4: scores are historical record only; no champion, so no win |
+| `EXPIRED` | nothing | no duel happened |
+| `FIZZLED` | nothing | no complete playlist was ever submitted |
+| `FORFEIT` | nothing | void |
+
+Only players who actually dueled are recorded, matching the exclusion
+`champions()` applies. A withdrawn player appears nowhere in the merit tables,
+which is what keeps a re-derivation from crowning them.
+
+Round wins come from `rounds WHERE status = 'resolved'`. `walkover` and
+`auto_tied` also set a winner, and winning because an opponent forfeited is not
+merit.
+
+### 7.2 Badges
+
+Every badge is awarded **once ever** — `badges` is keyed `(account_id, badge)`.
+Tiers are distinct ids, so a 5-win run is a permanent high-water mark.
+
+| id | Name (pt-BR / EN) | Earned by |
+| --- | --- | --- |
+| `debut` | Primeira Faixa / First Track | first duel |
+| `plays_5` | Frequente na Pista / Deck Regular | 5 duels |
+| `plays_25` | Lenda da Pista / Deck Legend | 25 duels |
+| `completionist` | Setlist Inteiro / Full Setlist | a full-length playlist |
+| `marathon` | Set Sem Fim / Endless Set | played through the final round |
+| `first_blood` | Primeiro Hit / First Hit | first win |
+| `hat_trick` | Trinca de Hits / Triple Hit | 3 consecutive wins |
+| `on_a_run` | Flow Perfeito / Perfect Flow | 5 consecutive wins |
+| `unstoppable` | Mix Incontrolável / Unstoppable Mix | 10 consecutive wins |
+| `first_contact` | Primeiro Dueto / First Duel | beat someone on another instance |
+| `wanderer` | Nômade de Gêneros / Genre Nomad | played across 3 instances |
+| `durable` | Ouvido Fiel / Loyal Ear | 10 duels against 10 different opponents |
+| `conductor` | DJ Residente / Resident DJ | first duel hosted |
+| `promoter` | Agitador Cultural / Culture Promoter | 10 duels hosted |
+
+`first_contact` and `wanderer` test the handle's domain as recorded at invite
+time. That does not follow an account that later migrates instances, so the
+badge means *where you met them*, not where they are now.
+
+### 7.3 Win streaks
+
+A streak is the longest run of consecutive wins among the duels an account
+**played**, ordered by `closed_at` descending. A duel the account did not play
+cannot break the run — a streak is a high-water mark, never something a break
+in play takes back. Streak badges are awarded once and kept.
+
+### 7.4 The board
+
+- **Window:** rolling 30 days. An all-time board hands the top spot to whoever
+  played most last month and it never moves, which ends the competition.
+- **Floor:** 3 duels before an account appears. A 1-1 record must not outrank a
+  9-2, so the floor applies to duels played, not to the ranked score. It is
+  also why a young board reads "needs 3 duels" rather than naming a winner from
+  a single game.
+- **Cadence:** weekly, keyed by ISO week. A week with fewer than 2 closed duels
+  or fewer than 3 distinct players is skipped — a board with nobody on it says
+  the bot is alive while showing nobody anything.
+- **Placement:** a reply into the most recent duel's thread, not a fresh root
+  post. It reaches the people already following the game instead of
+  broadcasting to every follower of a personal account.
+
+### 7.5 Delivery
+
+| Channel | What |
+| --- | --- |
+| Finale thread | One reply naming who unlocked what. Up to four mentions, so one notification per player — the mention is what carries it |
+| DM | The same awards plus the running total. Best-effort: a refused DM never stops the duel closing |
+| On demand | `@bot ranking` / `@bot badges`, public or by DM |
+
+The finale writes merit, awards badges, and flips `FINALE → CLOSED` last, so a
+resumed finale can still re-enter. The reply reads the badge ledger rather than
+the award return value, because a replay finds nothing new to award.

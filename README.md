@@ -60,6 +60,9 @@ LOG_LEVEL=debug LOG_PRETTY=1 npm run dev
 
 - Public: `@bot newgame "<theme>" 8-12 @challenger [@challenger...]`
 - Public: `@bot status`
+- Public: `@bot ranking` — the 30-day leaderboard, plus your position
+- Public: `@bot badges` — your own record
+- DM: `ranking` or `badges` — the same two views, privately
 - DM: `accept` or `decline`
 - DM: one YouTube link per line during submission collection
 - DM: `replace <position> <YouTube URL>`

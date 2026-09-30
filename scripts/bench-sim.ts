@@ -47,15 +47,18 @@ const RANDOM_SEEDS = [7, 42, 2024, 99, 1234, 31337];
  * Checks the fixed workload must produce (113–114 per pass, depending on the
  * seed's finale assertions, × 7 passes). Pinned so that weakening an assertion
  * cannot buy speed: the run fails when it changes.
+ *
+ * These counts include the merit feature: each finale posts one achievement
+ * reply and DMs one message per player it awarded.
  */
-const EXPECTED_CHECKS = 797;
+const EXPECTED_CHECKS = 825;
 /**
  * Statuses and DMs players receive. Pinned: cutting upstream calls by sending
  * less is not an optimisation. The request *total* is not pinned — it may fall —
  * but it must be identical in every repeat of a run (checked below), because the
  * workload is deterministic.
  */
-const EXPECTED_DELIVERED = { status: 1188, direct: 903 };
+const EXPECTED_DELIVERED = { status: 1216, direct: 959 };
 
 type Pass = { label: string; random: boolean; seed: number };
 
