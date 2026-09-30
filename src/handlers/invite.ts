@@ -1,9 +1,11 @@
-import { loadGame, openGamesForAccount, pendingInviteGameId, saveGameState } from "../db/games.js";
+import { loadGame, openGamesForAccount, pendingInviteGameId, saveGameState, setGameStatus } from "../db/games.js";
 import { loadPlayers } from "../db/players.js";
 import { acceptInvite, declineInvite, ValidationError } from "../game/engine.js";
 import type { Game, Player } from "../game/types.js";
 import { m } from "../i18n/index.js";
 import { dm, dmAuthor } from "../mastodon/dm.js";
+import { postSideEffect } from "../mastodon/posts.js";
+import { startDuelOncePlaylistsComplete } from "./submission.js";
 import { addSeconds } from "../time.js";
 import type { CommandInput, Handled, HandlerDeps, HandlerResult } from "./deps.js";
 
@@ -26,12 +28,31 @@ export function handleAccept(input: CommandInput, deps: HandlerDeps): Promise<Ha
   });
 }
 
+/**
+ * A declined challenger is out of the duel (only accepted players play). When
+ * no challenger is left pending or accepted — a two-player game whose
+ * challenger declined, or every challenger of a larger one — the game closes at
+ * once instead of idling until the acceptance deadline.
+ */
 export function handleDecline(input: CommandInput, deps: HandlerDeps): Promise<HandlerResult> {
   return answerPendingInvite(input, deps, async (pending) => {
-    saveAnsweredInvite(deps, pending, declineInvite(pending.game, pending.players, input.accountId));
+    const declined = declineInvite(pending.game, pending.players, input.accountId);
+    saveAnsweredInvite(deps, pending, declined);
     await dmAuthor(deps, input, m().declined());
+    await expireIfNoChallengerLeft(deps, declined);
+    // The last pending answer may be the one the accepted players were waiting on.
+    if (declined.game.status === "COLLECTING") await startDuelOncePlaylistsComplete(deps, declined.game.id);
     return { handled: true, kind: "declined" };
   });
+}
+
+async function expireIfNoChallengerLeft(deps: HandlerDeps, answered: Invitation): Promise<void> {
+  const challengerLeft = answered.players.some(
+    (p) => p.role === "challenger" && p.inviteStatus !== "declined",
+  );
+  if (challengerLeft || !setGameStatus(deps.db, answered.game.id, "INVITED", "EXPIRED", deps.now())) return;
+  const game = loadGame(deps.db, answered.game.id);
+  if (game) await postSideEffect(deps.client, game, "declined");
 }
 
 /**

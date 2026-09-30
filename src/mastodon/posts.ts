@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { MastodonClient, RequestOptions } from "./client.js";
 import type { Game, Player, PotSplit, Tally, Tune } from "../game/types.js";
 import {
@@ -7,9 +8,12 @@ import {
   sanitizeTitleForPost,
   truncate,
   truncatePostWithSuffix,
+  POST_LIMIT,
 } from "../templates/truncate.js";
 import { m } from "../i18n/index.js";
+import { instanceDomainOf, mention } from "./handle.js";
 import { byStanding, totalVotes } from "../game/scoring.js";
+import type { AwardedBadges } from "../game/merit.js";
 
 /**
  * Outbound Mastodon posting: round threads, polls, resolution, finale, side effects.
@@ -45,9 +49,15 @@ function acctOf(players: Player[], accountId: string): string {
   return players.find((p) => p.accountId === accountId)?.acct ?? accountId;
 }
 
+/** The `@mention` for one of the game's accounts, as a post on the client's instance must write it. */
+function handleOf(client: MastodonClient, players: Player[], accountId: string): string {
+  return mention(acctOf(players, accountId), instanceDomainOf(client));
+}
+
 /** `@alice 3 · @bob 1`, in the order given. */
-function standings(players: Player[]): string {
-  return players.map((p) => `@${p.acct} ${p.points}`).join(" · ");
+function standings(client: MastodonClient, players: Player[]): string {
+  const domain = instanceDomainOf(client);
+  return players.map((p) => `${mention(p.acct, domain)} ${p.points}`).join(" · ");
 }
 
 function roundKey(gameId: string, round: number, part: string): string {
@@ -75,9 +85,9 @@ export async function postRound(
     round,
     game.playlistLength,
     game.theme,
-    standings(players),
+    standings(client, players),
     game.pot,
-    playing.map((p) => `@${p.acct}`).join(", "),
+    playing.map((p) => mention(p.acct, instanceDomainOf(client))).join(", "),
   ));
 
   const announce = await postStatus(client, {
@@ -91,7 +101,7 @@ export async function postRound(
     // Mastodon's preview card (first URL in text wins) from the canonical
     // YouTube link, which is what produces the video embed.
     const text = truncatePostWithSuffix(
-      m().tuneLine(acctOf(players, t.accountId), sanitizeTitleForPost(t.title)),
+      m().tuneLine(handleOf(client, players, t.accountId), sanitizeTitleForPost(t.title)),
       t.canonicalUrl,
     );
     const posted = await postStatus(
@@ -157,7 +167,11 @@ export async function postRoundResolution(
   const lines: string[] = [];
   if (input.walkover) {
     lines.push(
-      m().resolutionWalkover(input.round, input.winnerAcct ?? "?", input.potAwarded),
+      m().resolutionWalkover(
+        input.round,
+        input.winnerAcct ? mention(input.winnerAcct, instanceDomainOf(client)) : "?",
+        input.potAwarded,
+      ),
     );
   } else if (input.potSplit && input.potSplit.total > 0) {
     lines.push(
@@ -168,10 +182,10 @@ export async function postRoundResolution(
       m().resolutionTie(input.round, input.newPot ?? game.pot),
     );
   } else if (input.winnerAcct) {
-    lines.push(m().resolutionWin(input.round, input.winnerAcct, input.potAwarded));
+    lines.push(m().resolutionWin(input.round, mention(input.winnerAcct, instanceDomainOf(client)), input.potAwarded));
   }
 
-  lines.push(m().standingsLine(standings([...players].sort(byStanding))));
+  lines.push(m().standingsLine(standings(client, [...players].sort(byStanding))));
   const potAfter = input.newPot ?? game.pot;
   if (input.newPot !== undefined || game.pot > 0 || input.wasTie) {
     lines.push(m().potLine(potAfter));
@@ -211,7 +225,7 @@ export async function postFinale(
   },
 ): Promise<string> {
   const ordered = [...players].sort(byStanding);
-  const champHandles = champions.map((id) => `@${acctOf(players, id)}`);
+  const champHandles = champions.map((id) => handleOf(client, players, id));
 
   const lines: string[] = [];
   if (champions.length > 1) {
@@ -220,7 +234,7 @@ export async function postFinale(
     lines.push(m().champion(champHandles[0]!));
   }
   lines.push(m().finaleTheme(game.theme, game.playlistLength));
-  lines.push(m().finaleStandings(standings(ordered)));
+  lines.push(m().finaleStandings(standings(client, ordered)));
   if (opts.potSplit && opts.potSplit.total > 0) {
     lines.push(m().finalePotSplit(opts.potSplit.total, opts.potSplit.each, opts.potSplit.count));
   }
@@ -243,7 +257,7 @@ export async function postFinale(
 
   for (const [tuneIndex, t] of winningTunes.entries()) {
     const text = truncatePostWithSuffix(
-      m().finaleWinningTune(t.round, acctOf(players, t.accountId), sanitizeTitleForPost(t.title)),
+      m().finaleWinningTune(t.round, handleOf(client, players, t.accountId), sanitizeTitleForPost(t.title)),
       t.canonicalUrl,
     );
     await postStatus(
@@ -256,14 +270,84 @@ export async function postFinale(
   return summary.id;
 }
 
-export type SideEffectKind = "expired" | "fizzled" | "forfeit" | "cancelled" | "default_win";
+/**
+ * The finale thread's achievement reply: who unlocked what in this duel.
+ *
+ * A separate post rather than extra lines on the summary — `postFinale` has
+ * already spent its 500-character budget. One post with up to four mentions
+ * keeps this to a single notification per player, and the mention is what
+ * carries it: a DM alone would reach nobody beyond the recipient.
+ */
+export async function postBadges(
+  client: MastodonClient,
+  awards: readonly AwardedBadges[],
+  inReplyToId: string,
+  gameId: string,
+): Promise<string> {
+  const header = m().badgeListHeader();
+  const lines = awards.map((a) =>
+    m().badgeListLine(`${mention(a.acct, instanceDomainOf(client))}: ${a.badges.map((b) => m().badgeName(b)).join(" · ")}`),
+  );
 
-const SIDE_EFFECT_COPY: Record<SideEffectKind, (g: Game, winnerAcct?: string) => string> = {
+  // Whole lines only. Cutting mid-string would leave a dangling half-name
+  // ("⚡ Mix Incontrolá…"), which reads as a bug; a dropped player line reads as
+  // an omission. The header always survives — it is the one line that says
+  // what the post is — so the budget is spent on the list, not squeezed out of
+  // it. pt-BR runs ~15% longer than EN, so this is where it bites.
+  const budget = POST_LIMIT - header.length - 1;
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (used + cost > budget) break;
+    kept.push(line);
+    used += cost;
+  }
+  const overflow = awards.length - kept.length;
+  const body = overflow > 0 ? truncatePostWithSuffix(kept.join("\n"), m().badgeListOverflow(overflow), budget) : kept.join("\n");
+
+  const posted = await postStatus(
+    client,
+    { status: `${header}\n${body}`, in_reply_to_id: inReplyToId },
+    { idempotencyKey: `pb:v1:merit:${gameId}:badges` },
+  );
+  return posted.id;
+}
+
+/**
+ * The weekly board, posted as a reply into the most recent duel's thread.
+ *
+ * A reply rather than a fresh root: that reaches the people already following
+ * the game instead of broadcasting to every follower of a personal account.
+ * The pull path covers everyone else, and costs them no attention.
+ */
+export async function postLeaderboard(
+  client: MastodonClient,
+  text: string,
+  inReplyToId: string,
+  week: string,
+): Promise<string> {
+  const status = truncate(text);
+  // Keyed by content as well as week: a retry after a refused post carries a
+  // different board, and the outbox rejects a key reused with another body.
+  const digest = createHash("sha1").update(`${inReplyToId}\n${status}`).digest("hex").slice(0, 12);
+  const posted = await postStatus(
+    client,
+    { status, in_reply_to_id: inReplyToId },
+    { idempotencyKey: `pb:v1:leaderboard:${week}:${digest}` },
+  );
+  return posted.id;
+}
+
+export type SideEffectKind = "expired" | "declined" | "fizzled" | "forfeit" | "cancelled" | "default_win";
+
+const SIDE_EFFECT_COPY: Record<SideEffectKind, (g: Game, winnerHandle?: string) => string> = {
   expired: (g) => m().sideExpired(g.theme),
+  declined: (g) => m().sideDeclined(g.theme),
   fizzled: (g) => m().sideFizzled(g.theme),
   forfeit: (g) => m().sideForfeit(g.theme),
   cancelled: (g) => m().sideCancelled(g.theme),
-  default_win: (g, winnerAcct) => m().sideDefaultWin(g.theme, winnerAcct ?? "?"),
+  default_win: (g, winnerHandle) => m().sideDefaultWin(g.theme, winnerHandle ?? "?"),
 };
 
 /** Reply closure/default outcome on the creation thread. */
@@ -273,7 +357,7 @@ export async function postSideEffect(
   kind: SideEffectKind,
   winnerAcct?: string,
 ): Promise<string> {
-  const text = SIDE_EFFECT_COPY[kind](game, winnerAcct);
+  const text = SIDE_EFFECT_COPY[kind](game, winnerAcct ? mention(winnerAcct, instanceDomainOf(client)) : undefined);
   const posted = await postStatus(
     client,
     { status: text, in_reply_to_id: game.threadRootId ?? game.id },

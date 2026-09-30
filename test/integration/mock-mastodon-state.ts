@@ -219,12 +219,21 @@ export class MockState {
 
   // ── serializers ────────────────────────────────────────────────────────
 
+  /**
+   * Account#pretty_acct: a local account is its bare username, a remote one
+   * `username@domain`. The registration string may spell a local account with
+   * the domain (`bot@mock.social`), which is only how it is looked up.
+   */
+  acctOf(account: MockAccount): string {
+    return account.domain === null ? account.username : `${account.username}@${account.domain}`;
+  }
+
   /** REST::AccountSerializer - id, username, acct are always present. */
   serializeAccount(account: MockAccount): Record<string, unknown> {
     return {
       id: account.id,
       username: account.username,
-      acct: account.acct,
+      acct: this.acctOf(account),
       display_name: account.username,
       locked: false,
       bot: true,
@@ -283,7 +292,7 @@ export class MockState {
         id: account.id,
         username: account.username,
         url: `https://${account.domain ?? this.domain}/@${account.username}`,
-        acct: account.acct,
+        acct: this.acctOf(account),
       })),
       tags: [],
       emojis: [],

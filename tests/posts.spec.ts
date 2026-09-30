@@ -211,7 +211,7 @@ describe("postRoundResolution (PRD §5.6)", () => {
     [
       "winner and pot bonus",
       { round: 1, winnerAcct: "alice", potAwarded: 2, wasTie: false, newPot: 0 },
-      m().resolutionWin(1, "alice", 2),
+      m().resolutionWin(1, "@alice", 2),
     ],
     ["tie and pot accrual", { round: 2, winnerAcct: null, potAwarded: 0, wasTie: true, newPot: 4 }, m().resolutionTie(2, 4)],
     [

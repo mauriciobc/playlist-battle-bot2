@@ -88,6 +88,12 @@ export class MastodonClient {
 
   rateLimit: RateLimitState | null = null;
 
+  /**
+   * The domain this instance's accounts belong to, once resolved at boot
+   * (see `resolveLocalDomain`). It can differ from the API host.
+   */
+  localDomain: string | null = null;
+
   constructor(opts: MastodonClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;

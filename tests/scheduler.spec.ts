@@ -59,6 +59,35 @@ describe("checkDeadlines — acceptance window (PRD §5.2)", () => {
     expect(gameRow(h.db, id).status).toBe("COLLECTING");
     expect(playerRow(h.db, id, "bob").invite_status).toBe("expired");
   });
+
+  it("a pending invite holds the start while the acceptance window is open", async () => {
+    const id = seedGame(h.db, { status: "COLLECTING", acceptanceDeadline: FUTURE, submissionDeadline: FUTURE });
+    seedPlayer(h.db, id, "host1");
+    seedPlayer(h.db, id, "alice");
+    seedPlayer(h.db, id, "bob", { invite: "pending" });
+    seedPlaylist(h.db, id, "host1");
+    seedPlaylist(h.db, id, "alice");
+
+    await checkDeadlines(h.sched);
+
+    expect(gameRow(h.db, id).status).toBe("COLLECTING");
+    expect(playerRow(h.db, id, "bob").invite_status).toBe("pending");
+  });
+
+  it("window closes with a silent invitee → auto-declined, duel starts without waiting for the submission deadline", async () => {
+    const id = seedGame(h.db, { status: "COLLECTING", acceptanceDeadline: PAST, submissionDeadline: FUTURE });
+    seedPlayer(h.db, id, "host1");
+    seedPlayer(h.db, id, "alice");
+    seedPlayer(h.db, id, "bob", { invite: "pending" });
+    seedPlaylist(h.db, id, "host1");
+    seedPlaylist(h.db, id, "alice");
+
+    await checkDeadlines(h.sched);
+
+    expect(playerRow(h.db, id, "bob").invite_status).toBe("expired");
+    expect(gameRow(h.db, id)).toMatchObject({ status: "ROUND", current_round: 1 });
+    expect(pollEntrants(h.db, id, 1).sort()).toEqual(["alice", "host1"]);
+  });
 });
 
 describe("checkDeadlines — submission window (PRD §5.4/§7)", () => {
@@ -88,7 +117,7 @@ describe("checkDeadlines — submission window (PRD §5.4/§7)", () => {
     await checkDeadlines(h.sched);
 
     expect(gameRow(h.db, id).status).toBe("CLOSED");
-    expect(h.texts()).toContain(m().sideDefaultWin("Theme", "host1"));
+    expect(h.texts()).toContain(m().sideDefaultWin("Theme", "@host1"));
   });
 
   it("2 complete + 1 partial → round 1 opens; the partial player withdraws (v1.1 full commitment)", async () => {
@@ -131,7 +160,7 @@ describe("checkPolls — poll expiry tally (PRD §5.5/§5.6)", () => {
     expect(pointsOf(id, "host1")).toBe(5 + 2); // votes + pot bonus
     expect(pointsOf(id, "alice")).toBe(3);
     expect(roundRow(h.db, id, 1)).toMatchObject({ status: "resolved", winner_account_id: "host1" });
-    expect(h.texts().join("\n")).toContain(m().resolutionWin(1, "host1", 2));
+    expect(h.texts().join("\n")).toContain(m().resolutionWin(1, "@host1", 2));
     expect(roundRow(h.db, id, 2)!.status).toBe("poll_open");
   });
 
@@ -174,7 +203,9 @@ describe("checkPolls — poll expiry tally (PRD §5.5/§5.6)", () => {
     await checkPolls(h.sched);
 
     expect(gameRow(h.db, id).status).toBe("CLOSED");
-    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id);
+    // Public root posts only: the merit system DMs its achievement notice, and
+    // that is a root post with direct visibility.
+    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id && p.body.visibility !== "direct");
     expect(rootPosts.at(-1)!.body.status).toContain(m().champion("@host1"));
     expect(pointsOf(id, "host1")).toBe(10 + 5 + 3); // prior + final votes + pot
   });
@@ -188,7 +219,7 @@ describe("checkPolls — poll expiry tally (PRD §5.5/§5.6)", () => {
     expect(pointsOf(id, "host1")).toBe(5 + 1); // votes + pot, awarded once (not doubled)
     expect(roundRow(h.db, id, 1)).toMatchObject({ status: "resolved", winner_account_id: "host1" });
     expect(gameRow(h.db, id).current_round).toBe(2); // advanced once
-    expect(h.texts().filter((t) => t.includes(m().resolutionWin(1, "host1", 1)))).toHaveLength(1);
+    expect(h.texts().filter((t) => t.includes(m().resolutionWin(1, "@host1", 1)))).toHaveLength(1);
   });
 
   it("a player in several open games: resolving one leaves the other untouched", async () => {
@@ -252,7 +283,8 @@ describe("resumeOpenGames — crash recovery (PRD §7)", () => {
     expect(gameRow(h.db, id).status).toBe("CLOSED");
     expect(roundRow(h.db, id, 8)!.resolution_posted_at).toBeTruthy();
     expect(h.texts().join("\n")).toMatch(/Round 8/);
-    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id);
+    // Public root posts only — the merit achievement DM is a direct root.
+    const rootPosts = h.posts.filter((p) => !p.body.in_reply_to_id && p.body.visibility !== "direct");
     expect(rootPosts.at(-1)!.body.status).toContain(m().champion("@host1"));
   });
 
@@ -313,7 +345,7 @@ describe("emitRound — walkover + auto-tie (PRD §5.6/§7)", () => {
     expect(playerRow(h.db, id, "host1").points).toBe(3);
 
     // The resolution post must describe the award it just made, not the pre-award snapshot.
-    const resolution = h.texts().find((t) => t.includes(m().resolutionWalkover(8, "host1", 3)));
+    const resolution = h.texts().find((t) => t.includes(m().resolutionWalkover(8, "@host1", 3)));
     expect(resolution).toContain("@host1 3");
     expect(resolution).toContain(m().potLine(0));
   });
@@ -359,12 +391,18 @@ describe("checkPolls — stagnation early close", () => {
 
   beforeEach(() => {
     Object.assign(h.poll, { expired: false, votes: [0, 0] });
-    h.sched.earlyClose = { enabled: true, minAgeSec: 300, stagnationSec: 300 };
+    h.sched.earlyClose = { enabled: true, minAgeSec: 300, stagnationSec: 300, underQuorumMinAgeSec: 1800 };
   });
 
-  function seedStagnant(o: { expiresAt: string; watchedVotes?: number; votesChangedAt?: string }): string {
-    const id = seedDuel(h.db, { currentRound: 1, pollDurationSec: 900 });
-    seedPollRound(h.db, id, { statusId: "poll-status-1", ...o });
+  // A 4h poll expiring at 15:30 opened at 11:30, so it is 1800s old at NOW (12:00).
+  const LONG_POLL = { durationSec: 14400, expiresAt: "2026-09-21T15:30:00.000Z" };
+
+  function seedStagnant(
+    o: { expiresAt: string; durationSec?: number; watchedVotes?: number; votesChangedAt?: string },
+  ): string {
+    const { durationSec = 900, ...round } = o;
+    const id = seedDuel(h.db, { currentRound: 1, pollDurationSec: durationSec });
+    seedPollRound(h.db, id, { statusId: "poll-status-1", ...round });
     return id;
   }
 
@@ -374,7 +412,7 @@ describe("checkPolls — stagnation early close", () => {
     // full game finish in minutes instead of 8 x 5 minutes.
     const openedAt = new Date(NOW);
     h.deps.now = () => new Date(openedAt.getTime() + 15_000); // 15s after the poll opened
-    h.sched.earlyClose = { enabled: true, minAgeSec: 0, stagnationSec: 0 };
+    h.sched.earlyClose = { enabled: true, minAgeSec: 0, stagnationSec: 0, underQuorumMinAgeSec: 0 };
     const id = seedStagnant({
       expiresAt: new Date(openedAt.getTime() + 300_000).toISOString(),
       watchedVotes: 0,
@@ -386,8 +424,8 @@ describe("checkPolls — stagnation early close", () => {
     expect(roundRow(h.db, id, 1)!.status).toBe("resolved");
   });
 
-  it("stagnant zero-vote poll past min age → resolves, deletes the poll status, advances", async () => {
-    const id = seedStagnant({ expiresAt: "2026-09-21T12:10:00.000Z" }); // age 300s
+  it("zero-vote poll past the under-quorum age → resolves as a tie, deletes the poll status, advances", async () => {
+    const id = seedStagnant(LONG_POLL);
 
     await checkPolls(h.sched);
 
@@ -396,6 +434,27 @@ describe("checkPolls — stagnation early close", () => {
     expect(h.deleted).toContain("/api/v1/statuses/poll-status-1");
     // one GET: the watch snapshot; resolve reuses it (no second tally fetch)
     expect(h.client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("zero-vote poll past min age but under the under-quorum age → stays open for voters", async () => {
+    const id = seedStagnant({ expiresAt: "2026-09-21T12:10:00.000Z", durationSec: 900 }); // age 300s < 1800s
+
+    await checkPolls(h.sched);
+
+    expect(roundRow(h.db, id, 1)!.status).toBe("poll_open");
+    expect(h.deleted).toHaveLength(0);
+  });
+
+  it("stagnant poll still below quorum waits for the under-quorum age, then resolves as a tie", async () => {
+    h.poll.votes = [1, 1]; // 2 < ROUND_QUORUM
+    const stagnantSince = "2026-09-21T11:00:00.000Z"; // still 3600s
+    const young = seedStagnant({ expiresAt: "2026-09-21T12:10:00.000Z", watchedVotes: 2, votesChangedAt: stagnantSince });
+    const aged = seedStagnant({ ...LONG_POLL, watchedVotes: 2, votesChangedAt: stagnantSince });
+
+    await checkPolls(h.sched);
+
+    expect(roundRow(h.db, young, 1)!.status).toBe("poll_open"); // age 300s
+    expect(roundRow(h.db, aged, 1)).toMatchObject({ status: "resolved", winner_account_id: null }); // quorum-forced tie
   });
 
   it("does not early-close before min age", async () => {
@@ -441,7 +500,7 @@ describe("checkPolls — stagnation early close", () => {
 
   it("disabled early close → no live poll fetches", async () => {
     const id = seedStagnant({ expiresAt: "2026-09-21T12:10:00.000Z" });
-    h.sched.earlyClose = { enabled: false, minAgeSec: 300, stagnationSec: 300 };
+    h.sched.earlyClose = { enabled: false, minAgeSec: 300, stagnationSec: 300, underQuorumMinAgeSec: 1800 };
 
     await checkPolls(h.sched);
 
@@ -450,7 +509,7 @@ describe("checkPolls — stagnation early close", () => {
   });
 
   it("poll status deletion failure is non-fatal — round still resolves, cleanup retried next sweep", async () => {
-    const id = seedStagnant({ expiresAt: "2026-09-21T12:10:00.000Z" });
+    const id = seedStagnant(LONG_POLL);
     h.client.delete.mockRejectedValueOnce(new Error("boom"));
 
     await expect(checkPolls(h.sched)).resolves.toBeUndefined();

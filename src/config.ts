@@ -101,21 +101,29 @@ const envSchema = z.object({
 
   // NOTE: Zod .default() short-circuits to the output side of the pipeline,
   // so defaults here are numbers (post-transform output type).
-  POLL_DURATION_SEC: intFromEnv(POLL_MIN_SEC, POLL_MAX_SEC).default(900),
-  ACCEPTANCE_WINDOW_SEC: intFromEnv(1).default(86400),
-  SUBMISSION_WINDOW_SEC: intFromEnv(1).default(172800),
+  // Poll duration is the hard cap on a round: early close ends most rounds
+  // sooner, so this only binds when voters keep trickling in.
+  POLL_DURATION_SEC: intFromEnv(POLL_MIN_SEC, POLL_MAX_SEC).default(4 * SECONDS_PER_HOUR),
+  ACCEPTANCE_WINDOW_SEC: intFromEnv(1).default(30 * SECONDS_PER_MINUTE),
+  SUBMISSION_WINDOW_SEC: intFromEnv(1).default(24 * SECONDS_PER_HOUR),
 
   CREATION_COOLDOWN_SEC: intFromEnv(0).default(600),
   MAX_GAMES_PER_PLAYER: intFromEnv(1).default(3),
+  // Delivery attempts (with backoff from 1 min) for a badge announcement.
+  MERIT_ANNOUNCE_MAX_ATTEMPTS: intFromEnv(1).default(8),
 
   // v1.1 1.4: replacement window for unavailable round tunes (minutes).
   REPLACEMENT_GRACE_MIN: intFromEnv(1).default(15),
 
   // Stagnation early close: resolve a still-open poll before Mastodon expires
   // it once votes stop changing (requires visible tallies, i.e. hide_totals off).
+  // A poll that reached ROUND_QUORUM closes after MIN_AGE and STAGNATION; one
+  // still below quorum would only score a tie, so it gets the longer
+  // UNDER_QUORUM_MIN_AGE to collect votes first.
   EARLY_CLOSE_ENABLED: envFlag("1"),
-  EARLY_CLOSE_MIN_AGE_SEC: intFromEnv(0).default(300),
-  EARLY_CLOSE_STAGNATION_SEC: intFromEnv(0).default(300),
+  EARLY_CLOSE_MIN_AGE_SEC: intFromEnv(0).default(15 * SECONDS_PER_MINUTE),
+  EARLY_CLOSE_STAGNATION_SEC: intFromEnv(0).default(15 * SECONDS_PER_MINUTE),
+  EARLY_CLOSE_UNDER_QUORUM_MIN_AGE_SEC: intFromEnv(0).default(SECONDS_PER_HOUR),
 
   AUTO_DELETE_WINDOW_HOURS: intFromEnv(0).default(0),
 
@@ -170,10 +178,12 @@ export type BotConfig = {
   submissionWindowSec: number;
   creationCooldownSec: number;
   maxGamesPerPlayer: number;
+  announceMaxAttempts: number;
   replacementGraceMin: number;
   earlyCloseEnabled: boolean;
   earlyCloseMinAgeSec: number;
   earlyCloseStagnationSec: number;
+  earlyCloseUnderQuorumMinAgeSec: number;
   autoDeleteWindowHours: number;
   /** Effective operating mode. TEST_MODE is folded in at load time. */
   runMode: RunMode;
@@ -236,6 +246,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     submissionWindowSec: e.SUBMISSION_WINDOW_SEC,
     creationCooldownSec: e.CREATION_COOLDOWN_SEC,
     maxGamesPerPlayer: e.MAX_GAMES_PER_PLAYER,
+    announceMaxAttempts: e.MERIT_ANNOUNCE_MAX_ATTEMPTS,
     replacementGraceMin: e.REPLACEMENT_GRACE_MIN,
     // EARLY_CLOSE_ENABLED stays operator-controlled in every mode. Only "test"
     // collapses the thresholds to zero; in "e2e" and "production" the
@@ -244,6 +255,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     earlyCloseEnabled: e.EARLY_CLOSE_ENABLED,
     earlyCloseMinAgeSec: isTest ? 0 : e.EARLY_CLOSE_MIN_AGE_SEC,
     earlyCloseStagnationSec: isTest ? 0 : e.EARLY_CLOSE_STAGNATION_SEC,
+    earlyCloseUnderQuorumMinAgeSec: isTest ? 0 : e.EARLY_CLOSE_UNDER_QUORUM_MIN_AGE_SEC,
     autoDeleteWindowHours: e.AUTO_DELETE_WINDOW_HOURS,
     runMode,
     notificationIntervalSec: e.NOTIFICATION_INTERVAL_SEC ?? cadence.notification,

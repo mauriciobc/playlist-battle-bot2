@@ -32,12 +32,14 @@ import {
   type WatchedPoll,
 } from "../db/rounds.js";
 import { completeCreation } from "../handlers/publicCommand.js";
+import { startDuelOncePlaylistsComplete } from "../handlers/submission.js";
 import type { HandlerDeps } from "../handlers/deps.js";
 import { removeStatus } from "../handlers/closure.js";
 import { reply } from "../mastodon/reply.js";
 import { tallyPoll, pollSnapshot, postSideEffect, type PollSnapshot, type TallyInput } from "../mastodon/posts.js";
 import { FIRST_ROUND, isTerminal, type Game, type Tally } from "../game/types.js";
 import { finalizeCollection, startRound, resolveRound } from "../game/engine.js";
+import { ROUND_QUORUM } from "../game/scoring.js";
 import { errorMessage } from "../errors.js";
 import { addSeconds, MS_PER_SECOND } from "../time.js";
 import { m } from "../i18n/index.js";
@@ -50,13 +52,25 @@ import {
   recoverRoundResult,
   recoverRoundResults,
 } from "./roundState.js";
+import { drainAnnouncements } from "./announcements.js";
+import { isoWeek, isoWeekStart } from "../time.js";
+import { outboxLanded } from "../db/outbox.js";
+import { boardActivity, latestClosedGame } from "../db/merit.js";
+import { shouldPublishBoard } from "../game/merit.js";
+import { boardHasRows, boardText } from "../handlers/meritView.js";
+import { postLeaderboard } from "../mastodon/posts.js";
 
 type EarlyCloseConfig = {
   enabled: boolean;
-  /** Minimum poll age before early close is allowed. */
+  /** Minimum age of a poll that has reached quorum before early close is allowed. */
   minAgeSec: number;
   /** Votes unchanged for this long → close early. */
   stagnationSec: number;
+  /**
+   * Minimum age of a poll still below quorum. Such a poll can only score a tie,
+   * so it is given longer to collect votes before it is closed.
+   */
+  underQuorumMinAgeSec: number;
 };
 
 export type SchedulerDeps = {
@@ -79,11 +93,12 @@ export async function checkDeadlines(deps: SchedulerDeps): Promise<void> {
   const expiredGames = await expireUnacceptedGames(handler, now);
   // Acceptance window closed with some accepts → expire remaining pending challengers.
   const expiredPendingInvites = expirePendingInvites(handler.db, now);
+  const startedGames = await startDuelsWithAnsweredInvites(handler);
   const finalizedGames = await finalizeGamesPastSubmissionDeadline(handler, now);
   const reemittedRounds = await reemitAnnouncedRounds(handler);
 
   handler.logger?.debug(
-    { expiredGames, expiredPendingInvites, finalizedGames, reemittedRounds },
+    { expiredGames, expiredPendingInvites, startedGames, finalizedGames, reemittedRounds },
     "deadline sweep complete",
   );
 }
@@ -95,6 +110,19 @@ async function expireUnacceptedGames(handler: HandlerDeps, now: Date): Promise<n
     setGameStatus(handler.db, gameId, "INVITED", "EXPIRED", now);
     const game = loadGame(handler.db, gameId);
     if (game) await postSideEffect(handler.client, game, "expired");
+  }
+  return gameIds.length;
+}
+
+/**
+ * Silent invitees were just auto-declined (expired) if the acceptance window
+ * closed, so COLLECTING games whose accepted players are all done can start
+ * without waiting for the submission deadline. Returns how many were examined.
+ */
+async function startDuelsWithAnsweredInvites(handler: HandlerDeps): Promise<number> {
+  const gameIds = gameIdsWithStatus(handler.db, "COLLECTING");
+  for (const gameId of gameIds) {
+    await startDuelOncePlaylistsComplete(handler, gameId);
   }
   return gameIds.length;
 }
@@ -211,7 +239,7 @@ async function checkStagnantPolls(handler: HandlerDeps, earlyClose: EarlyCloseCo
     const snapshot = await liveVotes(handler, poll);
     if (!snapshot) continue;
     const votesChangedAt = votesLastChangedAt(handler.db, poll, snapshot, now);
-    if (!votesChangedAt || !isStagnant(poll, votesChangedAt, now, earlyClose)) continue;
+    if (!votesChangedAt || !isStagnant(poll, votesChangedAt, snapshot.totalVotes, now, earlyClose)) continue;
 
     await resolvePoll(handler, poll, {
       tallies: snapshot.tallies,
@@ -267,10 +295,17 @@ function pollOpenedAt(poll: WatchedPoll): Date {
 }
 
 /** Old enough, votes still for long enough, and not expired yet (the due sweep owns expired polls). */
-function isStagnant(poll: WatchedPoll, votesChangedAt: Date, now: Date, earlyClose: EarlyCloseConfig): boolean {
+function isStagnant(
+  poll: WatchedPoll,
+  votesChangedAt: Date,
+  totalVotes: number,
+  now: Date,
+  earlyClose: EarlyCloseConfig,
+): boolean {
   const ageSec = (now.getTime() - pollOpenedAt(poll).getTime()) / MS_PER_SECOND;
   const stillSec = (now.getTime() - votesChangedAt.getTime()) / MS_PER_SECOND;
-  const oldEnough = ageSec >= earlyClose.minAgeSec;
+  const minAgeSec = totalVotes >= ROUND_QUORUM ? earlyClose.minAgeSec : earlyClose.underQuorumMinAgeSec;
+  const oldEnough = ageSec >= minAgeSec;
   const votesSettled = stillSec >= earlyClose.stagnationSec;
   const stillOpen = new Date(poll.pollExpiresAt).getTime() > now.getTime();
   return oldEnough && votesSettled && stillOpen;
@@ -433,8 +468,52 @@ export async function resumeOpenGames(deps: SchedulerDeps): Promise<void> {
   const readyStuck = await startStuckReadyGames(handler);
   const inFlightRounds = await resumeInFlightRounds(handler);
   const stuckFinales = await resumeStuckFinales(handler);
+  await drainAnnouncements(handler);
+  await sweepLeaderboard(handler, handler.now());
 
   handler.logger?.debug({ readyStuck, inFlightRounds, stuckFinales }, "game recovery sweep complete");
+}
+
+/**
+ * The weekly board, once per ISO week, into the most recent duel's thread.
+ *
+ * Two gates keep it from becoming noise. The outbox already records which
+ * logical posts exist, so asking it is enough to know this week is done — no
+ * second ledger to disagree. And a quiet week is skipped entirely: a board with
+ * nobody on it says the bot is alive while showing nobody anything, which is
+ * the worst thing a weekly post can do on a personal account.
+ *
+ * Runs on the recovery loop. A weekly post does not justify a fifth
+ * `LOOP_LABELS` heartbeat, and leaving that list alone keeps `healthcheck.ts`
+ * correct for free.
+ */
+export async function sweepLeaderboard(handler: HandlerDeps, now: Date): Promise<boolean> {
+  const week = isoWeek(now);
+  // Only a landed (or possibly-landed) post closes the week. A `failed` one
+  // stays retryable: each attempt has its own content-keyed effect id, so a
+  // changed board cannot collide with the failed one.
+  if (outboxLanded(handler.db, `pb:v1:leaderboard:${week}:`)) return false;
+  const since = isoWeekStart(now).toISOString();
+  const activity = boardActivity(handler.db, since);
+  if (!shouldPublishBoard(activity)) {
+    handler.logger?.debug({ ...activity, week }, "leaderboard skipped: quiet week");
+    return false;
+  }
+
+  if (!boardHasRows(handler.db, now, "wins")) {
+    handler.logger?.debug({ ...activity, week }, "leaderboard skipped: nobody meets the duel floor");
+    return false;
+  }
+
+  const latest = latestClosedGame(handler.db);
+  if (latest === null || latest.threadRootId === null) {
+    handler.logger?.debug({ week }, "leaderboard skipped: no duel thread to reply into");
+    return false;
+  }
+
+  await postLeaderboard(handler.client, boardText(handler.db, now, "wins", handler.instanceDomain), latest.threadRootId, week);
+  handler.logger?.info({ week, ...activity }, "leaderboard posted");
+  return true;
 }
 
 /** READY games that finished collection but never emitted round 1. Returns how many. */
@@ -471,7 +550,12 @@ async function resumeRound(handler: HandlerDeps, gameId: string, round: number):
 async function resumeStuckFinales(handler: HandlerDeps): Promise<number> {
   const gameIds = gameIdsWithStatus(handler.db, "FINALE");
   for (const gameId of gameIds) {
-    await emitFinale(handler, gameId);
+    // One game's failure must not starve the finales queued behind it.
+    try {
+      await emitFinale(handler, gameId);
+    } catch (err) {
+      handler.logger?.warn({ gameId, err: errorMessage(err) }, "finale resume failed; will retry");
+    }
   }
   return gameIds.length;
 }

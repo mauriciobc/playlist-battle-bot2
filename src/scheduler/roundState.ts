@@ -12,6 +12,15 @@ import {
 } from "../db/games.js";
 import { awardPoints, loadPlayers } from "../db/players.js";
 import { loadTunes } from "../db/tunes.js";
+import { enqueueAnnouncement } from "../db/announcements.js";
+import { drainAnnouncements } from "./announcements.js";
+import {
+  awardNewBadges,
+  awardsForGame,
+  insertGameResult,
+  insertParticipants,
+  markGameClosed,
+} from "../db/merit.js";
 import {
   RESOLVED_ROUND_STATUSES,
   deleteAnnouncedRound,
@@ -498,19 +507,44 @@ async function emitClaimedFinale(handler: HandlerDeps, gameId: string): Promise<
   const winningTunes = roundWinningTunes(db, gameId, tunes);
   const duelRounds = loadRounds(db, gameId).filter((r) => r.number <= game.playlistLength);
   const duelers = duelParticipants(players, duelRounds, tunes);
+  const crowned = champions(duelers);
   const potSplit = settleFinalPot(db, game, duelRounds.find((r) => r.number === game.playlistLength));
   // One link to the whole battle: a saved YT Music playlist when the bot
   // account is configured, an anonymous YouTube queue otherwise. Best-effort —
   // the finale posts its standings and per-round winners either way.
   const queueUrl = loadFinaleQueueUrl(db, gameId) ?? await publishBattleLink(handler, game, winningTunes);
 
-  await postFinale(handler.client, game, duelers, champions(duelers), winningTunes, {
+  const summaryId = await postFinale(handler.client, game, duelers, crowned, winningTunes, {
     duelThreadId: game.threadRootId,
     potSplit,
     queueUrl,
   });
 
-  setGameStatus(db, gameId, "FINALE", "CLOSED", handler.now());
+  // Merit and the game's close are one transaction, and the announcements are
+  // only *queued* in it. A crash leaves either nothing (the game is still in
+  // FINALE and this block runs again) or everything (closed, with the queue
+  // holding what is owed) — and a post that cannot be delivered never keeps a
+  // game open. Announcements read the badge ledger, never a return value, so a
+  // resumed finale finds the same awards.
+  const at = handler.now();
+  db.transaction(() => {
+    markGameClosed(db, gameId, at);
+    // champions() crowns everyone when nobody scored; a duel with no points
+    // has no winner, so it earns no wins.
+    const winners = duelers.some((p) => p.points > 0) ? crowned : [];
+    insertGameResult(db, { gameId, theme: game.theme, closedAt: at.toISOString(), champions: winners });
+    insertParticipants(db, gameId, duelers, winners);
+    for (const player of duelers) awardNewBadges(db, player.accountId, gameId, at);
+
+    const awards = awardsForGame(db, gameId);
+    if (awards.length > 0) enqueueAnnouncement(db, { gameId, kind: "thread", replyToId: summaryId }, at);
+    for (const award of awards) enqueueAnnouncement(db, { gameId, kind: "dm", accountId: award.accountId }, at);
+    setGameStatus(db, gameId, "FINALE", "CLOSED", at);
+  })();
+
+  // First attempt right away, so the usual case is as prompt as a direct post.
+  // Anything that fails retries from the recovery loop.
+  await drainAnnouncements(handler, gameId);
 }
 
 function roundWinningTunes(db: Db, gameId: string, tunes: Tune[]): WinningTune[] {

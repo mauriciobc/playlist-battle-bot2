@@ -171,6 +171,83 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     // loses nothing (v3 dropped the same kind of v1.0 leftovers).
     sql: `ALTER TABLE players DROP COLUMN display_name;`,
   },
+  {
+    version: 17,
+    // Merit system (achievements + leaderboard). Career stats are derived from
+    // these at read time — nothing here is an aggregate that can drift.
+    //
+    // `closed_at` is its own column rather than borrowing `updated_at`, which
+    // every saveGame touches: a win-streak walk needs a stable ordering and
+    // two games can close inside the same tick.
+    //
+    // game_results / game_participants are a snapshot written once in the same
+    // transaction as FINALE -> CLOSED. Re-deriving the champion later from
+    // players.points would be wrong: scoring.champions() runs over
+    // duelParticipants, which drops withdrawn players, so an all-zero finale
+    // (quorum-tie chain, pot zeroed) would crown everyone.
+    //
+    // badges is keyed (account_id, badge) so a badge is awarded once ever.
+    // Tiers are distinct ids — plays_5, plays_25 — so a 5-win run is a
+    // permanent high-water mark that a break in play cannot take away.
+    sql: `
+      ALTER TABLE games ADD COLUMN closed_at TEXT;
+
+      CREATE TABLE game_results (
+        game_id TEXT PRIMARY KEY REFERENCES games(id),
+        theme TEXT NOT NULL,
+        closed_at TEXT NOT NULL,
+        champion_count INTEGER NOT NULL,
+        champions_json TEXT NOT NULL
+      );
+      CREATE INDEX idx_game_results_closed ON game_results(closed_at);
+
+      CREATE TABLE game_participants (
+        game_id TEXT NOT NULL REFERENCES games(id),
+        account_id TEXT NOT NULL,
+        acct TEXT NOT NULL,
+        role TEXT NOT NULL,
+        points INTEGER NOT NULL,
+        was_champion INTEGER NOT NULL,
+        PRIMARY KEY (game_id, account_id)
+      );
+      CREATE INDEX idx_participants_account ON game_participants(account_id);
+
+      CREATE TABLE badges (
+        account_id TEXT NOT NULL,
+        badge TEXT NOT NULL,
+        awarded_at TEXT NOT NULL,
+        game_id TEXT,
+        PRIMARY KEY (account_id, badge)
+      );
+      CREATE INDEX idx_badges_awarded ON badges(awarded_at);
+    `,
+  },
+  {
+    version: 18,
+    // Merit announcement queue. One row per delivery (the thread reply, and one
+    // DM per awarded player), written in the finale transaction that closes the
+    // game, so an announcement can never be lost to a crash and a failing post
+    // can never keep a game open. `account_id` is '' for the thread row so the
+    // primary key needs no NULL. `reply_to_id` is the finale summary the thread
+    // reply answers. Delivery state lives here, not in the outbox: Mastodon only
+    // honours an Idempotency-Key for about an hour, so this table is the
+    // authority on what was delivered.
+    sql: `
+      CREATE TABLE merit_announcements (
+        game_id TEXT NOT NULL REFERENCES games(id),
+        kind TEXT NOT NULL,
+        account_id TEXT NOT NULL DEFAULT '',
+        reply_to_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (game_id, kind, account_id)
+      );
+      CREATE INDEX idx_merit_announcements_due ON merit_announcements(status, next_attempt_at);
+    `,
+  },
 ];
 
 /**

@@ -6,6 +6,7 @@
 
 import { m } from "../i18n/index.js";
 import { isValidPlaylistLength, MAX_CHALLENGERS } from "../game/types.js";
+import { canonicalAcct, parseAcct, qualifyMentions, sameAccount, type StatusMention } from "../mastodon/handle.js";
 
 export type CreateCommand =
   | {
@@ -34,14 +35,17 @@ function extractMentions(text: string): string[] {
   return out;
 }
 
-/** Local part of a handle (`alice` for `alice@other.social`). */
-function localPart(handle: string): string {
-  return handle.split("@")[0]!;
-}
-
-function mentionsBot(text: string, botAcct: string): boolean {
+/**
+ * Whether a written mention is the bot. `@bot@other.social` is someone else
+ * with the same local part, so once the instance is known only a bare `@bot`
+ * or `@bot@<this instance>` counts.
+ */
+function mentionsBot(text: string, botAcct: string, instanceDomain?: string): boolean {
   const bot = botAcct.toLowerCase();
-  return extractMentions(text).some((mention) => localPart(mention).toLowerCase() === bot);
+  return extractMentions(text).some((written) => {
+    const { user, domain } = parseAcct(written, instanceDomain);
+    return user.toLowerCase() === bot && (instanceDomain === undefined || domain === null);
+  });
 }
 
 /**
@@ -51,12 +55,13 @@ function mentionsBot(text: string, botAcct: string): boolean {
  * pattern dropped the local part of an unprefixed qualified handle, because
  * "@" appears inside "user@instance" and the capture began there.
  */
-function extractChallengers(text: string): string[] {
+function extractChallengers(text: string, instanceDomain?: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(CHALLENGER_RE)) {
-    const handle = match[2];
-    if (!handle) continue;
+    if (!match[2]) continue;
+    // `bob` and `bob@<this instance>` are one account: keep the canonical form.
+    const handle = canonicalAcct(match[2], instanceDomain);
     const key = handle.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -71,12 +76,7 @@ function extractChallengers(text: string): string[] {
  * the same local part) stays.
  */
 function challengersExceptBot(text: string, botAcct: string, instanceDomain?: string): string[] {
-  const bot = botAcct.toLowerCase();
-  const botQualified = instanceDomain ? `${bot}@${instanceDomain.toLowerCase()}` : bot;
-  return extractChallengers(text).filter((handle) => {
-    const lower = handle.toLowerCase();
-    return lower !== bot && lower !== botQualified;
-  });
+  return extractChallengers(text, instanceDomain).filter((handle) => !sameAccount(handle, botAcct, instanceDomain));
 }
 
 /**
@@ -100,8 +100,13 @@ function splitTheme(rest: string): { theme: string; remainder: string } | null {
  * Returns CreateCommand (ok or {error}) when the bot is mentioned with newgame,
  * or null when this text is not a create command for this bot.
  */
-export function parseCreateCommand(text: string, botAcct: string, instanceDomain?: string): CreateCommand | null {
-  if (!mentionsBot(text, botAcct)) return null;
+export function parseCreateCommand(
+  text: string,
+  botAcct: string,
+  instanceDomain?: string,
+  mentions: readonly StatusMention[] = [],
+): CreateCommand | null {
+  if (!mentionsBot(text, botAcct, instanceDomain)) return null;
   const command = stripLeadingMentions(text).trim();
   if (!/^newgame\b/i.test(command)) return null;
 
@@ -114,11 +119,9 @@ export function parseCreateCommand(text: string, botAcct: string, instanceDomain
   const playlistLength = Number(lengthToken[1]);
   if (!isValidPlaylistLength(playlistLength)) return { error: m().cmdLengthRange() };
 
-  const challengers = challengersExceptBot(
-    split.remainder.slice(lengthToken[0].length).trim(),
-    botAcct,
-    instanceDomain,
-  );
+  // Rendered text drops a remote mention's domain; the status's mentions array keeps it.
+  const written = qualifyMentions(split.remainder.slice(lengthToken[0].length).trim(), mentions, instanceDomain);
+  const challengers = challengersExceptBot(written, botAcct, instanceDomain);
   if (challengers.length === 0) return { error: m().cmdTagChallenger() };
   if (challengers.length > MAX_CHALLENGERS) return { error: m().cmdMaxChallengers() };
   const unique = new Set(challengers.map((c) => c.toLowerCase()));
@@ -127,9 +130,26 @@ export function parseCreateCommand(text: string, botAcct: string, instanceDomain
   return { theme: split.theme, playlistLength, challengers };
 }
 
-export function parseStatusCommand(text: string, botAcct: string): boolean {
-  if (!mentionsBot(text, botAcct)) return false;
+export function parseStatusCommand(text: string, botAcct: string, instanceDomain?: string): boolean {
+  if (!mentionsBot(text, botAcct, instanceDomain)) return false;
   return /^(status|help)\b/i.test(stripLeadingMentions(text).trim());
+}
+
+/**
+ * "ranking" or "classificação", as a whole word. The accents are optional on
+ * purpose ("classificacao", "classificaçao"), but a longer word that merely
+ * starts with them ("rankings of the 80s") is not the command.
+ */
+const RANKING_WORD = /^(ranking|classifica[cç][aã]o)(?![\p{L}\p{N}])/iu;
+
+/** `@bot ranking` / `@bot badges` — pull the board or a player's record. */
+export function parseMeritCommand(text: string, botAcct: string, instanceDomain?: string): "ranking" | "badges" | null {
+  if (!mentionsBot(text, botAcct, instanceDomain)) return null;
+  const rest = stripLeadingMentions(text).trim();
+  if (/^ranking\b/i.test(rest)) return "ranking";
+  if (/^(badges|conquistas|achievements)\b/i.test(rest)) return "badges";
+  if (RANKING_WORD.test(rest)) return "ranking";
+  return null;
 }
 
 export type DmReply =
@@ -138,9 +158,19 @@ export type DmReply =
   | { kind: "cancel" }
   | { kind: "links"; urls: string[] }
   | { kind: "replace"; position: number; url: string }
+  | { kind: "ranking" }
+  | { kind: "badges" }
   | { kind: "unknown" };
 
-const URL_RE = /https?:\/\/[^\s<>"']+/gi;
+/** One URL per match: a second `http(s)://` ends the first, so `a,https://b` is two links. */
+const URL_RE = /https?:\/\/(?:(?!https?:\/\/)[^\s<>"'])+/gi;
+/** Punctuation that follows a link in prose ("…watch?v=x, then…") rather than belonging to it. */
+const TRAILING_PUNCTUATION_RE = /[.,;:!?)\]}]+$/;
+
+function extractUrls(text: string): string[] {
+  return (text.match(URL_RE) ?? []).map((url) => url.replace(TRAILING_PUNCTUATION_RE, "")).filter((url) => /^https?:\/\/./i.test(url));
+}
+
 /** v1.1 1.6: `replace <n> <url>` — case-insensitive, position 1..99. */
 const REPLACE_RE = /^replace\s+(\d{1,2})\s+(https?:\/\/\S+)/i;
 
@@ -158,6 +188,11 @@ export function parseDmReply(text: string): DmReply {
   if (/^accept\b/i.test(t)) return { kind: "accept" };
   if (/^decline\b/i.test(t)) return { kind: "decline" };
   if (/^cancel\b/i.test(t)) return { kind: "cancel" };
+  // Match the stem rather than enumerating accents: "classificação",
+  // "classificacao" and "classificaçao" are all the same word to a player whose
+  // keyboard dropped a diacritic.
+  if (RANKING_WORD.test(t)) return { kind: "ranking" };
+  if (/^(badges|conquistas)\b/i.test(t)) return { kind: "badges" };
 
   const replace = t.match(REPLACE_RE);
   if (replace) {
@@ -165,7 +200,7 @@ export function parseDmReply(text: string): DmReply {
   }
 
   // Any URL counts here; the submission handler decides whether it is a YouTube video.
-  const urls = t.match(URL_RE) ?? [];
+  const urls = extractUrls(t);
   return urls.length > 0 ? { kind: "links", urls } : { kind: "unknown" };
 }
 

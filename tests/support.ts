@@ -39,7 +39,7 @@ type FakeClient = {
   delete: Mock<(path: string) => Promise<unknown>>;
 };
 
-type Harness = {
+export type Harness = {
   db: Db;
   posts: Posted[];
   deleted: string[];
@@ -104,6 +104,7 @@ export function createHarness(opts: HarnessOpts = {}): Harness {
     submissionWindowSec: 172800,
     creationCooldownSec: 600,
     maxGamesPerPlayer: 3,
+    announceMaxAttempts: 8,
     lookup: vi.fn(async (acct: string) => ({ id: `id-${acct.split("@")[0]!}`, acct })),
     resolveTitle: vi.fn(async (videoId: string) => ({
       videoId,

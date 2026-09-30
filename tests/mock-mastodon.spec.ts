@@ -61,7 +61,7 @@ describe("MockMastodon: authentication", () => {
     expect(res.status).toBe(200);
     const body = await jsonOf(res);
     // AccountSerializer: id, username, acct are always present.
-    expect(body.acct).toBe("mauriciobc@mock.social");
+    expect(body.acct).toBe("mauriciobc"); // bare: the account is local to the mock
     expect(typeof body.id).toBe("string");
     expect(body.id).not.toBe("");
   });
@@ -316,7 +316,8 @@ describe("MockMastodon: account lookup", () => {
       { headers: AUTH },
     );
     expect(res.status).toBe(200);
-    expect((await jsonOf(res)).acct).toBe("saiugol@mock.social");
+    // Account#pretty_acct: a local account is bare even when looked up qualified.
+    expect((await jsonOf(res)).acct).toBe("saiugol");
   });
 
   it("resolves a bare handle against the requesting account's instance", async () => {
@@ -326,7 +327,7 @@ describe("MockMastodon: account lookup", () => {
       { headers: AUTH },
     );
     expect(res.status).toBe(200);
-    expect((await jsonOf(res)).acct).toBe("mauriciobc@mock.social");
+    expect((await jsonOf(res)).acct).toBe("mauriciobc");
   });
 
   it("404s an unknown handle", async () => {
@@ -335,5 +336,22 @@ describe("MockMastodon: account lookup", () => {
       { headers: AUTH },
     );
     expect(res.status).toBe(404);
+  });
+
+  it("reports a remote account qualified", async () => {
+    server.registerToken("remote-token", "jacky@other.social");
+    const res = await fetch(
+      url(server, "/api/v1/accounts/lookup?acct=jacky%40other.social"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    expect((await jsonOf(res)).acct).toBe("jacky@other.social");
+  });
+
+  it("tells the bot which domain its accounts live on, without authentication", async () => {
+    // Api::V2::InstancesController: `domain` is LOCAL_DOMAIN, not the API host.
+    const res = await fetch(url(server, "/api/v2/instance"));
+    expect(res.status).toBe(200);
+    expect((await jsonOf(res)).domain).toBe("mock.social");
   });
 });

@@ -116,6 +116,12 @@ export class MockMastodonServer {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const path = new URL(req.url ?? "/", this.baseUrl || "http://localhost");
+      // Api::V2::InstancesController skips authentication. `domain` is
+      // Rails.configuration.x.local_domain: the domain accounts belong to, which
+      // need not be the host the API is reached on.
+      if (req.method === "GET" && path.pathname === "/api/v2/instance") {
+        return json(res, 200, { domain: this.state.domain, title: "mock", version: "4.5.0" });
+      }
       const viewer = this.state.accountForToken(bearer(req));
       if (!viewer) return json(res, 401, { error: "The access token is invalid" });
 

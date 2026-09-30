@@ -186,7 +186,7 @@ for (const locale of ["en", "pt-BR"] as const) {
     it("is false for every in-play post", () => {
       const inPlay = [
         m().gameCreated("Theme", 8, 2, "2026-09-22T12:00:00.000Z", "game-id"),
-        m().inviteDm("Theme", "host", 8, "2026-09-22T12:00:00.000Z"),
+        m().inviteDm("Theme", "@host", 8, "2026-09-22T12:00:00.000Z"),
         m().submitFirst(8),
         m().tuneAcceptedMore(1, 8, "A Song", 2),
         m().tuneAcceptedComplete(8, 8, "A Song"),
@@ -194,18 +194,18 @@ for (const locale of ["en", "pt-BR"] as const) {
         m().replaceTuneDm(2, 1, "A Song", "2026-09-22T12:00:00.000Z"),
         m().duelStart("Theme", 8, 2),
         m().roundAnnounce(1, 8, "Theme", "@a 0 · @b 0", 0, "@a, @b"),
-        m().tuneLine("a", "A Song"),
+        m().tuneLine("@a", "A Song"),
         m().pollPrompt(1),
-        m().resolutionWin(1, "a", 2),
+        m().resolutionWin(1, "@a", 2),
         m().resolutionTie(1, 1),
         m().resolutionFinalTie(8, 3, 1),
-        m().resolutionWalkover(1, "a", 2),
+        m().resolutionWalkover(1, "@a", 2),
         m().standingsLine("@a 2 · @b 1"),
         m().potLine(1),
         // The finale is detected by its root; its per-tune replies carry
         // "winner" / "Vencedor" and must not be the trigger.
         m().finaleQueue(),
-        m().finaleWinningTune(1, "a", "A Song"),
+        m().finaleWinningTune(1, "@a", "A Song"),
       ];
       for (const text of inPlay) expect(looksLikeFinale(text), text).toBe(false);
     });

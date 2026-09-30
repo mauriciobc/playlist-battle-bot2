@@ -6,7 +6,8 @@ import { errorMessage } from "../errors.js";
 import { finalizeCollection, startRound, submitTune, ValidationError } from "../game/engine.js";
 import { FIRST_ROUND, MIN_PLAYERS, type Game, type Player, type Tune } from "../game/types.js";
 import { m } from "../i18n/index.js";
-import { dmAuthor } from "../mastodon/dm.js";
+import { dm, dmAuthor } from "../mastodon/dm.js";
+import { mention } from "../mastodon/handle.js";
 import { reply } from "../mastodon/reply.js";
 import { emitRound } from "../scheduler/roundState.js";
 import { extractVideoId } from "../youtube/normalize.js";
@@ -31,7 +32,8 @@ type LinkBatch = {
   /** Every tune of the game, including the ones this batch added. */
   tunes: Tune[];
   accepted: number;
-  lastRejection: Rejection | null;
+  /** Why each link of this batch that was turned down was, in the order sent. */
+  rejections: Rejection[];
 };
 
 /**
@@ -53,15 +55,51 @@ export async function handleLinkSubmission(
     return { handled: true, kind: "no_collecting_game" };
   }
 
+  const countBefore = loadTunes(deps.db, game.id).filter((t) => t.accountId === input.accountId).length;
   const batch = await submitLinks(input, deps, game, urls);
-  const lastDetail = batch.lastRejection?.detail ?? null;
+  const lastDetail = batch.rejections.at(-1)?.detail ?? null;
   if (batch.accepted > 0) {
+    await notifySkippedLinks(deps, batch);
+    await announceFinishedPlaylist(deps, batch, countBefore);
     await startDuelOncePlaylistsComplete(deps, game.id);
     return { handled: true, kind: "tune_accepted", detail: { accepted: batch.accepted, lastError: lastDetail } };
   }
 
-  await dmAuthor(deps, input, batch.lastRejection?.playerMessage ?? m().linkRejected());
+  await dmAuthor(deps, input, batch.rejections.at(-1)?.playerMessage ?? m().linkRejected());
   return { handled: true, kind: "tune_rejected", detail: lastDetail };
+}
+
+/** A batch that took some links and turned others down says which, so nothing is dropped silently. */
+async function notifySkippedLinks(deps: HandlerDeps, batch: LinkBatch): Promise<void> {
+  if (batch.rejections.length === 0) return;
+  try {
+    await dmAuthor(deps, batch.author, m().linksSkipped(batch.rejections.map((r) => r.playerMessage)));
+  } catch (err) {
+    // The accepted tunes stand even when this note is refused.
+    deps.logger?.warn({ err: errorMessage(err), gameId: batch.game.id }, "skipped-links DM failed");
+  }
+}
+
+/** The batch that completed the author's playlist tells every other accepted player. */
+async function announceFinishedPlaylist(deps: HandlerDeps, batch: LinkBatch, countBefore: number): Promise<void> {
+  const { game, tunes } = batch;
+  const authorId = batch.author.accountId;
+  const tuneCount = (accountId: string) => tunes.filter((t) => t.accountId === accountId).length;
+  const finishedNow = countBefore < game.playlistLength && tuneCount(authorId) >= game.playlistLength;
+  if (!finishedNow) return;
+
+  const accepted = batch.players.filter((p) => p.inviteStatus === "accepted");
+  const author = accepted.find((p) => p.accountId === authorId);
+  const waiting = accepted.filter((p) => tuneCount(p.accountId) < game.playlistLength).length;
+  const text = m().playlistFinished(mention(author?.acct ?? authorId, deps.instanceDomain), game.playlistLength, waiting);
+  for (const other of accepted.filter((p) => p.accountId !== authorId)) {
+    try {
+      await dm(deps, other.accountId, text);
+    } catch (err) {
+      // A refused DM must not fail the author's submission.
+      deps.logger?.warn({ err: errorMessage(err), gameId: game.id, to: other.accountId }, "playlist-finished DM failed");
+    }
+  }
 }
 
 /**
@@ -224,11 +262,11 @@ async function submitLinks(input: CommandInput, deps: HandlerDeps, game: Game, u
     players: loadPlayers(deps.db, game.id),
     tunes: loadTunes(deps.db, game.id),
     accepted: 0,
-    lastRejection: null,
+    rejections: [],
   };
   for (const url of urls) {
     const rejection = await submitLink(deps, batch, url);
-    if (rejection) batch.lastRejection = rejection;
+    if (rejection) batch.rejections.push(rejection);
   }
   return batch;
 }
@@ -283,8 +321,12 @@ function submissionFailure(deps: HandlerDeps, videoId: string, err: unknown): Re
   return { playerMessage: m().resolveVideoError(), detail };
 }
 
-/** Once every accepted player's playlist is complete, close collection and start round 1. */
-async function startDuelOncePlaylistsComplete(deps: HandlerDeps, gameId: string): Promise<void> {
+/**
+ * Once every accepted player's playlist is complete and no invite is still
+ * pending, close collection and start round 1. Called after each tune, each
+ * decline, and by the deadline sweep (which expires the pending invites).
+ */
+export async function startDuelOncePlaylistsComplete(deps: HandlerDeps, gameId: string): Promise<void> {
   const ready = closeCompletedCollection(deps, gameId);
   if (!ready) return;
   const started = startRound(ready.game, FIRST_ROUND, deps.now());
@@ -297,15 +339,17 @@ async function startDuelOncePlaylistsComplete(deps: HandlerDeps, gameId: string)
   await emitRound(deps, gameId, FIRST_ROUND);
 }
 
-/** COLLECTING → READY when every accepted player has a complete playlist; the READY game and its duelists, else null. */
+/** COLLECTING → READY when no invite is pending and every accepted player has a complete playlist; the READY game and its duelists, else null. */
 function closeCompletedCollection(deps: HandlerDeps, gameId: string): { game: Game; players: Player[] } | null {
   const game = loadGame(deps.db, gameId)!;
-  const players = loadPlayers(deps.db, gameId).filter((p) => p.inviteStatus === "accepted");
+  const everyone = loadPlayers(deps.db, gameId);
+  const players = everyone.filter((p) => p.inviteStatus === "accepted");
   const tunes = loadTunes(deps.db, gameId);
+  const inviteStillOpen = everyone.some((p) => p.inviteStatus === "pending");
   const everyPlaylistComplete = players.every(
     (p) => tunes.filter((t) => t.accountId === p.accountId).length >= game.playlistLength,
   );
-  if (!everyPlaylistComplete || players.length < MIN_PLAYERS) return null;
+  if (inviteStillOpen || !everyPlaylistComplete || players.length < MIN_PLAYERS) return null;
 
   const finalized = finalizeCollection(game, players, tunes, deps.now());
   if (!saveGameState(deps.db, finalized.game, finalized.players, "COLLECTING")) return null;

@@ -44,15 +44,16 @@ describe("loadConfig", () => {
       MASTODON_TOKEN: validEnv.MASTODON_TOKEN,
       BOT_ACCT: validEnv.BOT_ACCT,
     });
-    expect(c.pollDurationSec).toBe(900); // 15 minutes
-    expect(c.acceptanceWindowSec).toBe(86400);
-    expect(c.submissionWindowSec).toBe(172800);
+    expect(c.pollDurationSec).toBe(14400); // 4 hours
+    expect(c.acceptanceWindowSec).toBe(1800); // 30 minutes
+    expect(c.submissionWindowSec).toBe(86400); // 24 hours
     expect(c.creationCooldownSec).toBe(600);
     expect(c.maxGamesPerPlayer).toBe(3);
     expect(c.replacementGraceMin).toBe(15);
     expect(c.earlyCloseEnabled).toBe(true);
-    expect(c.earlyCloseMinAgeSec).toBe(300);
-    expect(c.earlyCloseStagnationSec).toBe(300);
+    expect(c.earlyCloseMinAgeSec).toBe(900);
+    expect(c.earlyCloseStagnationSec).toBe(900);
+    expect(c.earlyCloseUnderQuorumMinAgeSec).toBe(3600);
     expect(c.autoDeleteWindowHours).toBe(0);
     expect(c.dbPath).toBe("./data/bot.db");
     expect(c.locale).toBe("en");
@@ -194,6 +195,7 @@ describe("RUN_MODE", () => {
     expect(c.earlyCloseEnabled).toBe(true);
     expect(c.earlyCloseMinAgeSec).toBe(0);
     expect(c.earlyCloseStagnationSec).toBe(0);
+    expect(c.earlyCloseUnderQuorumMinAgeSec).toBe(0);
   });
 
   it("lets RUN_MODE win over TEST_MODE", () => {

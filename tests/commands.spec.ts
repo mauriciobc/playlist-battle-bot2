@@ -70,7 +70,9 @@ describe("parseCreateCommand", () => {
     ["@a @b @c", ["a", "b", "c"]],
     ["@alice @bob@other.social", ["alice", "bob@other.social"]],
     ["alice@other.social @bob@third.social", ["alice@other.social", "bob@third.social"]],
-    ["@a@mastodon.social @b@bsky.social @c@ursal.zone", ["a@mastodon.social", "b@bsky.social", "c@ursal.zone"]],
+    // a handle on the bot's own instance is the same account as the bare one
+    ["@a@mastodon.social @b@bsky.social @c@ursal.zone", ["a", "b@bsky.social", "c@ursal.zone"]],
+    ["@bob @bob@mastodon.social @BOB@Mastodon.Social", ["bob"]],
     // same local part as the bot on another instance is a different person
     [`@${BOT}@other.instance`, [`${BOT}@other.instance`]],
   ])("accepts challenger form %s", (arg, challengers) => {
@@ -86,6 +88,42 @@ describe("parseCreateCommand", () => {
     [`${BOT}@other.social`, "other.social"],
   ])("never resolves the bot's own handle %s (instance %s) to a challenger", (arg, domain) => {
     expect(parseCreateCommand(`@${BOT} newgame "X" 8 ${arg}`, BOT, domain)).toEqual({ error: m().cmdTagChallenger() });
+  });
+
+  describe("with the status's mentions array (rendered text drops a remote mention's domain)", () => {
+    const bot = { username: BOT, acct: BOT };
+    const parse = (text: string, mentions: { username: string; acct: string }[]) =>
+      parseCreateCommand(text, BOT, "mastodon.social", mentions);
+
+    it("tells a local challenger from a remote one written the same way", () => {
+      const mentions = [bot, { username: "bob", acct: "bob" }, { username: "jacky", acct: "jacky@other.social" }];
+      expect(parse(`@${BOT} newgame "X" 8 @bob @jacky`, mentions)).toMatchObject({
+        challengers: ["bob", "jacky@other.social"],
+      });
+    });
+
+    it("keeps two accounts that share a username apart, in text order", () => {
+      const mentions = [bot, { username: "sam", acct: "sam" }, { username: "sam", acct: "sam@other.social" }];
+      expect(parse(`@${BOT} newgame "X" 8 @sam @sam`, mentions)).toMatchObject({
+        challengers: ["sam", "sam@other.social"],
+      });
+    });
+
+    it("a repeated remote mention stays remote instead of falling back to a local account", () => {
+      const mentions = [bot, { username: "jacky", acct: "jacky@other.social" }];
+      expect(parse(`@${BOT} newgame "X" 8 @jacky @jacky`, mentions)).toMatchObject({
+        challengers: ["jacky@other.social"],
+      });
+    });
+
+    it("leaves a mention the array does not list as written", () => {
+      expect(parse(`@${BOT} newgame "X" 8 @ghost`, [bot])).toMatchObject({ challengers: ["ghost"] });
+    });
+  });
+
+  it("does not treat a same-named account on another instance as the bot", () => {
+    expect(parseCreateCommand(`@${BOT}@other.social newgame "X" 8 @a`, BOT, "mastodon.social")).toBeNull();
+    expect(parseCreateCommand(`@${BOT}@mastodon.social newgame "X" 8 @a`, BOT, "mastodon.social")).not.toBeNull();
   });
 
   it.each([
@@ -155,5 +193,12 @@ describe("parseDmReply (accept/decline/cancel/links/replace)", () => {
       "https://music.youtube.com/watch?v=ccccccccccc",
     ];
     expect(parseDmReply(urls.join("\n"))).toEqual({ kind: "links", urls });
+  });
+
+  it("splits links glued together by commas or punctuation and drops trailing punctuation", () => {
+    expect(parseDmReply("https://youtu.be/aaaaaaaaaaa,https://youtu.be/bbbbbbbbbbb; (https://youtu.be/ccccccccccc).")).toEqual({
+      kind: "links",
+      urls: ["https://youtu.be/aaaaaaaaaaa", "https://youtu.be/bbbbbbbbbbb", "https://youtu.be/ccccccccccc"],
+    });
   });
 });

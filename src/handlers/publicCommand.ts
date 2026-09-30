@@ -15,9 +15,17 @@ import type { Game, Player } from "../game/types.js";
 import { m } from "../i18n/index.js";
 import { MastodonApiError } from "../mastodon/client.js";
 import { dm } from "../mastodon/dm.js";
+import { canonicalAcct, mention } from "../mastodon/handle.js";
 import type { PublicVisibility } from "../mastodon/notifications.js";
 import { reply } from "../mastodon/reply.js";
-import { htmlToText, parseCreateCommand, parseStatusCommand, type CreateCommand } from "./commands.js";
+import {
+  htmlToText,
+  parseCreateCommand,
+  parseMeritCommand,
+  parseStatusCommand,
+  type CreateCommand,
+} from "./commands.js";
+import { playerText, rankingTextFor } from "./meritView.js";
 import type { CommandInput, Handled, HandlerDeps, HandlerResult } from "./deps.js";
 
 type NewGameCommand = Exclude<CreateCommand, { error: string }>;
@@ -42,9 +50,19 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
   }
 
   const text = htmlToText(input.content);
-  if (parseStatusCommand(text, deps.botAcct)) return handleStatus(input, deps);
+  if (parseStatusCommand(text, deps.botAcct, deps.instanceDomain)) return handleStatus(input, deps);
 
-  const command = parseCreateCommand(text, deps.botAcct, deps.instanceDomain);
+  const merit = parseMeritCommand(text, deps.botAcct, deps.instanceDomain);
+  if (merit === "ranking") {
+    await reply(deps, input.statusId, rankingTextFor(deps.db, input.accountId, input.accountAcct, deps.now(), deps.instanceDomain), replyVisibility(input));
+    return { handled: true, kind: "ranking" };
+  }
+  if (merit === "badges") {
+    await reply(deps, input.statusId, playerText(deps.db, input.accountId, input.accountAcct, deps.instanceDomain), replyVisibility(input));
+    return { handled: true, kind: "badges" };
+  }
+
+  const command = parseCreateCommand(text, deps.botAcct, deps.instanceDomain, input.mentions);
   if (command === null) return { handled: false, reason: "not a command" };
   if ("error" in command) return replyWithError(input, deps, command.error);
   if (replyVisibility(input) === "private") return replyWithError(input, deps, m().errPrivateCreate());
@@ -91,13 +109,13 @@ async function handleStatus(input: CommandInput, deps: HandlerDeps): Promise<Han
 
   const game = loadGame(deps.db, gameId)!;
   const players = loadPlayers(deps.db, gameId);
-  await reply(deps, input.statusId, statusSummary(game, players), replyVisibility(input));
+  await reply(deps, input.statusId, statusSummary(game, players, deps.instanceDomain), replyVisibility(input));
   return { handled: true, kind: "status", detail: game.id };
 }
 
-function statusSummary(game: Game, players: Player[]): string {
+function statusSummary(game: Game, players: Player[], instanceDomain: string): string {
   const statusLabel = m().gameStatus(game.status, game.currentRound, game.playlistLength);
-  const playersStr = players.map((p) => `@${p.acct} ${m().statusPoints(p.points)}`).join(", ");
+  const playersStr = players.map((p) => `${mention(p.acct, instanceDomain)} ${m().statusPoints(p.points)}`).join(", ");
   return [
     `${m().statusLabelStatus()}: ${statusLabel}`,
     `${m().statusLabelTheme()}: ${game.theme}`,
@@ -144,7 +162,7 @@ async function persistNewGame(input: CommandInput, deps: HandlerDeps, command: N
   const { game, players } = createGameInput(
     {
       // Local accounts report a bare username; remote ones carry "user@domain".
-      host: { accountId: input.accountId, acct: input.accountAcct },
+      host: { accountId: input.accountId, acct: canonicalAcct(input.accountAcct, deps.instanceDomain) },
       theme: command.theme,
       playlistLength: command.playlistLength,
       challengers,
@@ -170,7 +188,7 @@ async function resolveChallengers(deps: HandlerDeps, accts: string[]): Promise<C
   for (const acct of accts) {
     try {
       const info = await deps.lookup(acct);
-      challengers.push({ accountId: info.id, acct: info.acct });
+      challengers.push({ accountId: info.id, acct: canonicalAcct(info.acct, deps.instanceDomain) });
     } catch (err) {
       if (err instanceof MastodonApiError) throw new ValidationError(m().challengerLookupFailed(acct));
       throw err;
@@ -213,7 +231,7 @@ async function ensureThreadRoot(
 
 async function sendPendingInvites(deps: HandlerDeps, game: Game, players: Player[]): Promise<void> {
   const hostAcct = players.find((p) => p.role === "host")?.acct ?? UNKNOWN_HOST_ACCT;
-  const invitation = m().inviteDm(game.theme, hostAcct, game.playlistLength, game.acceptanceDeadline ?? "");
+  const invitation = m().inviteDm(game.theme, mention(hostAcct, deps.instanceDomain), game.playlistLength, game.acceptanceDeadline ?? "");
   for (const invitee of unsentInvites(deps.db, game.id)) {
     await dm(deps, invitee.accountId, invitation, invitee.acct, {
       idempotencyKey: `pb:v1:creation:${game.id}:invite:${invitee.accountId}`,
