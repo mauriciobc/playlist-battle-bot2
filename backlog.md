@@ -109,6 +109,26 @@ opponents)
 Hosting — feeds the funnel:
 `conductor` (first duel hosted) · `promoter` (10 hosted)
 
+Names are DJ-themed, pt-BR first (that is the live locale) with English
+equivalents in the same table:
+
+| id | pt-BR | en | earned by |
+| --- | --- | --- | --- |
+| `debut` | Primeira Faixa | First Track | first duel |
+| `plays_5` | Frequente na Pista | Deck Regular | 5 duels |
+| `plays_25` | Lenda da Pista | Deck Legend | 25 duels |
+| `completionist` | Setlist Inteiro | Full Setlist | full-length playlist |
+| `marathon` | Set Sem Fim | Endless Set | played to the final round |
+| `first_blood` | Primeiro Hit | First Hit | first win |
+| `hat_trick` | Trinca de Hits | Triple Hit | 3 consecutive wins |
+| `on_a_run` | Flow Perfeito | Perfect Flow | 5 consecutive wins |
+| `unstoppable` | Mix Incontrolável | Unstoppable Mix | 10 consecutive wins |
+| `first_contact` | Primeiro Dueto | First Duel | beat someone off-instance |
+| `wanderer` | Nômade de Gêneros | Genre Nomad | played across 3 instances |
+| `durable` | Ouvido Fiel | Loyal Ear | 10 duels, 10 opponents |
+| `conductor` | DJ Residente | Resident DJ | first duel hosted |
+| `promoter` | Agitador Cultural | Culture Promoter | 10 duels hosted |
+
 Thirteen is a ceiling, not a quota. `completionist` and `marathon` are close to
 automatic for anyone who plays a 12-round duel and read as filler next to
 `hat_trick`; cut those two first if the ladder looks padded in rendered copy.

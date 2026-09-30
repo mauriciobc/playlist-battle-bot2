@@ -276,10 +276,24 @@ export async function postBadges(
   const lines = awards.map((a) =>
     m().badgeListLine(`@${a.acct}: ${a.badges.map((b) => m().badgeName(b)).join(" · ")}`),
   );
-  // The header is fixed and short, so the list absorbs the truncation. Squeezing
-  // the header instead (truncatePostWithSuffix) would drop the one line that
-  // says what the post is.
-  const body = truncate(lines.join("\n"), POST_LIMIT - header.length - 1);
+
+  // Whole lines only. Cutting mid-string would leave a dangling half-name
+  // ("⚡ Mix Incontrolá…"), which reads as a bug; a dropped player line reads as
+  // an omission. The header always survives — it is the one line that says
+  // what the post is — so the budget is spent on the list, not squeezed out of
+  // it. pt-BR runs ~15% longer than EN, so this is where it bites.
+  const budget = POST_LIMIT - header.length - 1;
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (used + cost > budget) break;
+    kept.push(line);
+    used += cost;
+  }
+  const overflow = awards.length - kept.length;
+  const body = overflow > 0 ? truncatePostWithSuffix(kept.join("\n"), m().badgeListOverflow(overflow), budget) : kept.join("\n");
+
   const posted = await postStatus(
     client,
     { status: `${header}\n${body}`, in_reply_to_id: inReplyToId },
