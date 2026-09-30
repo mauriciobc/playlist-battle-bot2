@@ -11,11 +11,6 @@ function schemaVersion(): number {
   return row.v ?? 0;
 }
 
-function schemaVersionOf(db: Db): number {
-  const row = db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as { v: number | null };
-  return row.v ?? 0;
-}
-
 function columns(db: Db, table: string): string[] {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
 }

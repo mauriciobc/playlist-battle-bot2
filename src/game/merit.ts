@@ -54,6 +54,13 @@ export const BADGE_IDS = [
 
 export type BadgeId = (typeof BADGE_IDS)[number];
 
+/** One player's badges earned in a single duel, for the finale announcement. */
+export type AwardedBadges = {
+  accountId: string;
+  acct: string;
+  badges: BadgeId[];
+};
+
 /** Consecutive wins each streak badge requires. */
 const STREAK_THRESHOLDS: ReadonlyArray<readonly [BadgeId, number]> = [
   ["hat_trick", 3],

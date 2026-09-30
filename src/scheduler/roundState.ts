@@ -13,6 +13,13 @@ import {
 import { awardPoints, loadPlayers } from "../db/players.js";
 import { loadTunes } from "../db/tunes.js";
 import {
+  awardNewBadges,
+  awardsForGame,
+  insertGameResult,
+  insertParticipants,
+  markGameClosed,
+} from "../db/merit.js";
+import {
   RESOLVED_ROUND_STATUSES,
   deleteAnnouncedRound,
   loadRound,
@@ -36,6 +43,7 @@ import {
   postRound,
   postRoundResolution,
   postFinale,
+  postBadges,
   type PostRoundResult,
   type TallyInput,
 } from "../mastodon/posts.js";
@@ -498,19 +506,38 @@ async function emitClaimedFinale(handler: HandlerDeps, gameId: string): Promise<
   const winningTunes = roundWinningTunes(db, gameId, tunes);
   const duelRounds = loadRounds(db, gameId).filter((r) => r.number <= game.playlistLength);
   const duelers = duelParticipants(players, duelRounds, tunes);
+  const crowned = champions(duelers);
   const potSplit = settleFinalPot(db, game, duelRounds.find((r) => r.number === game.playlistLength));
   // One link to the whole battle: a saved YT Music playlist when the bot
   // account is configured, an anonymous YouTube queue otherwise. Best-effort —
   // the finale posts its standings and per-round winners either way.
   const queueUrl = loadFinaleQueueUrl(db, gameId) ?? await publishBattleLink(handler, game, winningTunes);
 
-  await postFinale(handler.client, game, duelers, champions(duelers), winningTunes, {
+  const summaryId = await postFinale(handler.client, game, duelers, crowned, winningTunes, {
     duelThreadId: game.threadRootId,
     potSplit,
     queueUrl,
   });
 
-  setGameStatus(db, gameId, "FINALE", "CLOSED", handler.now());
+  // Merit is recorded before the status flip and read back from the ledger,
+  // never from a return value: a resumed finale finds nothing "new" to award,
+  // so an announcement derived from the return value would post nothing on
+  // recovery. Leaving the game in FINALE until every post has landed keeps
+  // that recovery path open — a closed game is never revisited.
+  const at = handler.now();
+  db.transaction(() => {
+    markGameClosed(db, gameId, at);
+    insertGameResult(db, { gameId, theme: game.theme, closedAt: at.toISOString(), champions: crowned });
+    insertParticipants(db, gameId, duelers, crowned);
+    for (const player of duelers) awardNewBadges(db, player.accountId, gameId, at);
+  })();
+
+  const awards = awardsForGame(db, gameId);
+  if (awards.length > 0) {
+    await postBadges(handler.client, awards, summaryId, gameId);
+  }
+
+  setGameStatus(db, gameId, "FINALE", "CLOSED", at);
 }
 
 function roundWinningTunes(db: Db, gameId: string, tunes: Tune[]): WinningTune[] {

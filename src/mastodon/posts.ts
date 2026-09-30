@@ -10,6 +10,8 @@ import {
 } from "../templates/truncate.js";
 import { m } from "../i18n/index.js";
 import { byStanding, totalVotes } from "../game/scoring.js";
+import { POST_LIMIT } from "../templates/truncate.js";
+import type { AwardedBadges } from "../game/merit.js";
 
 /**
  * Outbound Mastodon posting: round threads, polls, resolution, finale, side effects.
@@ -254,6 +256,36 @@ export async function postFinale(
   }
 
   return summary.id;
+}
+
+/**
+ * The finale thread's achievement reply: who unlocked what in this duel.
+ *
+ * A separate post rather than extra lines on the summary — `postFinale` has
+ * already spent its 500-character budget. One post with up to four mentions
+ * keeps this to a single notification per player, and the mention is what
+ * carries it: a DM alone would reach nobody beyond the recipient.
+ */
+export async function postBadges(
+  client: MastodonClient,
+  awards: readonly AwardedBadges[],
+  inReplyToId: string,
+  gameId: string,
+): Promise<string> {
+  const header = m().badgeListHeader();
+  const lines = awards.map((a) =>
+    m().badgeListLine(`@${a.acct}: ${a.badges.map((b) => m().badgeName(b)).join(" · ")}`),
+  );
+  // The header is fixed and short, so the list absorbs the truncation. Squeezing
+  // the header instead (truncatePostWithSuffix) would drop the one line that
+  // says what the post is.
+  const body = truncate(lines.join("\n"), POST_LIMIT - header.length - 1);
+  const posted = await postStatus(
+    client,
+    { status: `${header}\n${body}`, in_reply_to_id: inReplyToId },
+    { idempotencyKey: `pb:v1:merit:${gameId}:badges` },
+  );
+  return posted.id;
 }
 
 export type SideEffectKind = "expired" | "fizzled" | "forfeit" | "cancelled" | "default_win";

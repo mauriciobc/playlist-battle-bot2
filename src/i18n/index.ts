@@ -3,7 +3,25 @@
  * `setLocale` at boot; call `m()` wherever a reply/post is built.
  */
 
+import type { BadgeId } from "../game/merit.js";
 export type Locale = "en" | "pt-BR";
+const EN_BADGES: Record<BadgeId, string> = {
+  debut: "🎖️ Debut",
+  plays_5: "🎖️ Regular",
+  plays_25: "🏅 Veteran",
+  completionist: "📀 Full Playlist",
+  marathon: "🏃 Marathon",
+  first_blood: "🩸 First Blood",
+  hat_trick: "🎩 Hat-trick",
+  on_a_run: "🔥 On a Run",
+  unstoppable: "⚡ Unstoppable",
+  first_contact: "🌐 First Contact",
+  wanderer: "🧭 Wanderer",
+  durable: "🤝 Durable",
+  conductor: "🎪 Conductor",
+  promoter: "📣 Promoter",
+};
+
 
 const en = {
   // commands.ts
@@ -139,6 +157,14 @@ const en = {
   sideCancelled: (theme: string) => `🚫 Game "${theme}" cancelled by host.`,
   sideDefaultWin: (theme: string, winnerAcct: string) =>
     `🎖️ Game "${theme}": only one complete playlist — @${winnerAcct} wins by default (last one standing)!`,
+
+  // merit.ts
+  badgeName: (id: BadgeId) => EN_BADGES[id],
+  badgeListHeader: () => "🏅 Achievements unlocked",
+  badgeListLine: (names: string) => `• ${names}`,
+  badgeDmHeader: (count: number) => `🏅 You unlocked ${count} new achievement(s)!`,
+  badgeDmNone: () => "You have no new achievements yet — finish a duel to start.",
+  badgeDmTotal: (held: number) => `You now hold ${held} achievement(s).`,
 };
 
 const PT_BR_STATUS: Record<string, string> = {
@@ -152,6 +178,23 @@ const PT_BR_STATUS: Record<string, string> = {
   FIZZLED: "ESVAZIADO",
   FORFEIT: "DESCLASSIFICADO",
   CANCELLED: "CANCELADO",
+};
+
+const PT_BR_BADGES: Record<BadgeId, string> = {
+  debut: "🎖️ Estreia",
+  plays_5: "🎖️ Regular",
+  plays_25: "🏅 Veterano",
+  completionist: "📀 Playlist Completa",
+  marathon: "🏃 Maratona",
+  first_blood: "🩸 Primeiro Sangue",
+  hat_trick: "🎩 Hat-trick",
+  on_a_run: "🔥 Em Chamas",
+  unstoppable: "⚡ Imparável",
+  first_contact: "🌐 Primeiro Contato",
+  wanderer: "🧭 Andarilho",
+  durable: "🤝 Constante",
+  conductor: "🎪 Anfitrião",
+  promoter: "📣 Promotor",
 };
 
 /** Every locale must implement the English catalog exactly. */
@@ -286,6 +329,14 @@ const ptBR: Messages = {
   sideCancelled: (theme) => `🚫 Jogo "${theme}" cancelado pelo anfitrião.`,
   sideDefaultWin: (theme, winnerAcct) =>
     `🎖️ Jogo "${theme}": apenas uma playlist completa — @${winnerAcct} vence por padrão (o último em pé)!`,
+
+  // merit.ts
+  badgeName: (id) => PT_BR_BADGES[id],
+  badgeListHeader: () => "🏅 Conquistas desbloqueadas",
+  badgeListLine: (names) => `• ${names}`,
+  badgeDmHeader: (count) => `🏅 Você desbloqueou ${count} conquista(s) nova(s)!`,
+  badgeDmNone: () => "Você ainda não tem conquistas — conclua um duelo para começar.",
+  badgeDmTotal: (held) => `Agora você tem ${held} conquista(s).`,
 };
 
 const catalogs: Record<Locale, Messages> = { en, "pt-BR": ptBR };

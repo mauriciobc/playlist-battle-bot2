@@ -406,9 +406,12 @@ describe("finale playlist link (PRD §5.7)", () => {
 
     await emitFinale(h.deps, gameId);
 
-    // summary + one post per winning tune, and no link reply in between
-    expect(h.posts).toHaveLength(3);
-    expect(h.texts()[1]).toMatch(/Round 1/);
+    // Summary + one post per winning tune, with no link reply among them. The
+    // count is deliberately not pinned: the merit system adds an achievement
+    // reply, and what this test is about is the absent link, not the total.
+    expect(h.texts().filter((t) => /list=|watch_videos/.test(t))).toHaveLength(0);
+    expect(h.texts().filter((t) => /Round 1/.test(t))).toHaveLength(1);
+    expect(h.texts().some((t) => /Achievements unlocked/.test(t))).toBe(true);
     expect(playlistIdOf(gameId)).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import {
   instanceOf,
   rankBoard,
   winCount,
+  type AwardedBadges,
   type BadgeId,
   type BoardEntry,
   type BoardMetric,
@@ -213,12 +214,32 @@ export function awardNewBadges(
   return fresh;
 }
 
-/** Badges awarded in a game, in the order they were granted. */
-export function badgesForGame(db: Db, gameId: string): AwardedBadgeRow[] {
+/**
+ * Badges awarded in a game, grouped per player with the handle to address.
+ *
+ * Read from the ledger rather than from `awardNewBadges`' return value: a
+ * resumed finale finds nothing "new" to award, so an announcement derived
+ * from the return value would silently post nothing on recovery.
+ */
+export function awardsForGame(db: Db, gameId: string): AwardedBadges[] {
   const rows = db
-    .prepare("SELECT badge, awarded_at, game_id FROM badges WHERE game_id = ? ORDER BY awarded_at, badge")
-    .all(gameId) as { badge: BadgeId; awarded_at: string; game_id: string | null }[];
-  return rows.map((r) => ({ badge: r.badge, awardedAt: r.awarded_at, gameId: r.game_id }));
+    .prepare(
+      `SELECT p.account_id AS accountId, p.acct AS acct, b.badge AS badge
+         FROM badges b
+         JOIN game_participants p
+           ON p.game_id = b.game_id AND p.account_id = b.account_id
+        WHERE b.game_id = ?
+        ORDER BY p.rowid, b.awarded_at, b.badge`,
+    )
+    .all(gameId) as { accountId: string; acct: string; badge: BadgeId }[];
+
+  const grouped = new Map<string, AwardedBadges>();
+  for (const row of rows) {
+    const entry = grouped.get(row.accountId) ?? { accountId: row.accountId, acct: row.acct, badges: [] };
+    entry.badges.push(row.badge);
+    grouped.set(row.accountId, entry);
+  }
+  return [...grouped.values()];
 }
 
 /** Account handle last recorded for an account, or null for a stranger. */
