@@ -39,7 +39,7 @@ type FakeClient = {
   delete: Mock<(path: string) => Promise<unknown>>;
 };
 
-type Harness = {
+export type Harness = {
   db: Db;
   posts: Posted[];
   deleted: string[];

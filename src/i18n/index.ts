@@ -166,6 +166,19 @@ const en = {
   badgeDmHeader: (count: number) => `🏅 You unlocked ${count} new achievement(s)!`,
   badgeDmNone: () => "You have no new achievements yet — finish a duel to start.",
   badgeDmTotal: (held: number) => `You now hold ${held} achievement(s).`,
+  boardHeader: (since: string) => `🏆 Ranking · ${since}`,
+  boardRow: (place: number, acct: string, score: string) => `${place}. @${acct} — ${score}`,
+  boardEmpty: () => "No duels have closed yet — the board is empty.",
+  boardFloor: () => "Needs at least 3 duels to rank.",
+  boardWins: (n: number) => `${n} wins`,
+  boardDuels: (n: number) => `${n} duels`,
+  boardYourRank: (place: number, of: number) => `You are #${place} of ${of}.`,
+  boardUnranked: () => "You are not on the board yet.",
+  playerHeader: (acct: string) => `🏅 @${acct}`,
+  playerNoBadges: () => "No achievements yet. Finish a duel to start.",
+  playerStats: (wins: number, duels: number, streak: number) =>
+    `${duels} duels · ${wins} wins · best run ${streak}`,
+  boardListOverflow: (n: number) => `…and ${n} more`,
 };
 
 const PT_BR_STATUS: Record<string, string> = {
@@ -339,6 +352,19 @@ const ptBR: Messages = {
   badgeDmHeader: (count) => `🏅 Você desbloqueou ${count} conquista(s) nova(s)!`,
   badgeDmNone: () => "Você ainda não tem conquistas — conclua um duelo para começar.",
   badgeDmTotal: (held) => `Agora você tem ${held} conquista(s).`,
+  boardHeader: (since) => `🏆 Classificação · ${since}`,
+  boardRow: (place, acct, score) => `${place}. @${acct} — ${score}`,
+  boardEmpty: () => "Nenhum duelo terminou ainda — a classificação está vazia.",
+  boardFloor: () => "Precisa de pelo menos 3 duelos para entrar.",
+  boardWins: (n) => `${n} ${n === 1 ? "vitória" : "vitórias"}`,
+  boardDuels: (n) => `${n} ${n === 1 ? "duelo" : "duelos"}`,
+  boardYourRank: (place, of) => `Você está em #${place} de ${of}.`,
+  boardUnranked: () => "Você ainda não está na classificação.",
+  playerHeader: (acct) => `🏅 @${acct}`,
+  playerNoBadges: () => "Nenhuma conquista ainda. Conclua um duelo para começar.",
+  playerStats: (wins, duels, streak) =>
+    `${duels} ${duels === 1 ? "duelo" : "duelos"} · ${wins} ${wins === 1 ? "vitória" : "vitórias"} · melhor sequência ${streak}`,
+  boardListOverflow: (n) => `…e mais ${n}`,
 };
 
 const catalogs: Record<Locale, Messages> = { en, "pt-BR": ptBR };

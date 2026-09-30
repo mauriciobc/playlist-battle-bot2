@@ -17,7 +17,14 @@ import { MastodonApiError } from "../mastodon/client.js";
 import { dm } from "../mastodon/dm.js";
 import type { PublicVisibility } from "../mastodon/notifications.js";
 import { reply } from "../mastodon/reply.js";
-import { htmlToText, parseCreateCommand, parseStatusCommand, type CreateCommand } from "./commands.js";
+import {
+  htmlToText,
+  parseCreateCommand,
+  parseMeritCommand,
+  parseStatusCommand,
+  type CreateCommand,
+} from "./commands.js";
+import { playerText, rankingTextFor } from "./meritView.js";
 import type { CommandInput, Handled, HandlerDeps, HandlerResult } from "./deps.js";
 
 type NewGameCommand = Exclude<CreateCommand, { error: string }>;
@@ -43,6 +50,16 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
 
   const text = htmlToText(input.content);
   if (parseStatusCommand(text, deps.botAcct)) return handleStatus(input, deps);
+
+  const merit = parseMeritCommand(text, deps.botAcct);
+  if (merit === "ranking") {
+    await reply(deps, input.statusId, rankingTextFor(deps.db, input.accountId, input.accountAcct, deps.now()), replyVisibility(input));
+    return { handled: true, kind: "ranking" };
+  }
+  if (merit === "badges") {
+    await reply(deps, input.statusId, playerText(deps.db, input.accountId, input.accountAcct), replyVisibility(input));
+    return { handled: true, kind: "badges" };
+  }
 
   const command = parseCreateCommand(text, deps.botAcct, deps.instanceDomain);
   if (command === null) return { handled: false, reason: "not a command" };

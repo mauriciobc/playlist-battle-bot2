@@ -132,12 +132,25 @@ export function parseStatusCommand(text: string, botAcct: string): boolean {
   return /^(status|help)\b/i.test(stripLeadingMentions(text).trim());
 }
 
+/** `@bot ranking` / `@bot badges` — pull the board or a player's record. */
+export function parseMeritCommand(text: string, botAcct: string): "ranking" | "badges" | null {
+  if (!mentionsBot(text, botAcct)) return null;
+  const rest = stripLeadingMentions(text).trim();
+  if (/^ranking\b/i.test(rest)) return "ranking";
+  if (/^(badges|conquistas|achievements)\b/i.test(rest)) return "badges";
+  // Same stem match as the DM parser: accent-insensitive on purpose.
+  if (/^classific/i.test(rest)) return "ranking";
+  return null;
+}
+
 export type DmReply =
   | { kind: "accept" }
   | { kind: "decline" }
   | { kind: "cancel" }
   | { kind: "links"; urls: string[] }
   | { kind: "replace"; position: number; url: string }
+  | { kind: "ranking" }
+  | { kind: "badges" }
   | { kind: "unknown" };
 
 const URL_RE = /https?:\/\/[^\s<>"']+/gi;
@@ -158,6 +171,11 @@ export function parseDmReply(text: string): DmReply {
   if (/^accept\b/i.test(t)) return { kind: "accept" };
   if (/^decline\b/i.test(t)) return { kind: "decline" };
   if (/^cancel\b/i.test(t)) return { kind: "cancel" };
+  // Match the stem rather than enumerating accents: "classificação",
+  // "classificacao" and "classificaçao" are all the same word to a player whose
+  // keyboard dropped a diacritic.
+  if (/^(ranking|classific)/i.test(t)) return { kind: "ranking" };
+  if (/^(badges|conquistas)\b/i.test(t)) return { kind: "badges" };
 
   const replace = t.match(REPLACE_RE);
   if (replace) {
