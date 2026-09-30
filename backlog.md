@@ -126,14 +126,32 @@ amplification that makes the feature worth building.
 
 ```
 🏅 Novas conquistas
-@alice: 🎩 Hat-trick · 🌐 First Contact
-@bob: 🎖️ Debut
+• @alice: 🎩 Hat-trick · 🌐 First Contact
+• @bob: 🎖️ Debut
 ```
 
-Resolve handles live through `deps.lookup` so renames do not print a dead
-`@alice`.
-
 **DM** carries the detail: full badge list, career line, position.
+
+### Progress
+
+Done: migration 17, `src/game/merit.ts`, `src/db/merit.ts`, the finale wiring
+(results + participants + badge award in one transaction, status flip last),
+`postBadges`, and the i18n copy in both catalogs. 575 unit tests and 117 e2e
+checks pass. Verified end to end — a losing dueler still earns participation
+badges, a winner earns skill and hosting ones:
+
+```
+🏅 Achievements unlocked
+• @host: 📀 Full Playlist · 🎪 Conductor · 🎖️ Debut · 🩸 First Blood · 🏃 Marathon
+• @alice: 📀 Full Playlist · 🎖️ Debut
+```
+
+Not done: the badge DM, the `ranking` command (public + DM), the weekly
+leaderboard sweep, and the RULES.md section.
+
+One thing the e2e output settled: `completionist` and `marathon` fire for
+everybody, because any completed duel satisfies both. They read as noise next
+to `first_blood`. Cut them first if the ladder looks padded.
 
 ### Crash safety
 
