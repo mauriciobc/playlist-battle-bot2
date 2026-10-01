@@ -4,7 +4,7 @@ import type { Game, Player, PotSplit, Tally, Tune } from "../game/types.js";
 import {
   abbreviatePollOption,
   assertPostLength,
-  dedupePollOptions,
+  tuneLabel,
   sanitizeTitleForPost,
   truncate,
   truncatePostWithSuffix,
@@ -96,12 +96,14 @@ export async function postRound(
   }, { idempotencyKey: roundKey(game.id, round, "announce") });
 
   let prevId = announce.id;
+  // Tunes are labelled A, B, C… in post order, never by player: the poll is a
+  // blind vote. The label→account map lives only in optionMap (and the DB).
   for (const [tuneIndex, t] of roundTunes.entries()) {
     // Sanitize the displayed title so an embedded URL inside it can't steal
     // Mastodon's preview card (first URL in text wins) from the canonical
     // YouTube link, which is what produces the video embed.
     const text = truncatePostWithSuffix(
-      m().tuneLine(handleOf(client, players, t.accountId), sanitizeTitleForPost(t.title)),
+      m().tuneLine(tuneLabel(tuneIndex), sanitizeTitleForPost(t.title)),
       t.canonicalUrl,
     );
     const posted = await postStatus(
@@ -113,15 +115,13 @@ export async function postRound(
   }
 
   // Poll: one option per playing player, ≤25 chars each (PRD §2.2/§2.3).
-  // Mastodon enforces ≤50 chars, ≤4 options, and UNIQUENESS (422 otherwise),
-  // so dedupe after truncation.
+  // Options carry the tune label (unique per round, so Mastodon's 422 on
+  // duplicate options cannot occur) and never the player's name.
   const optionMap: Record<string, string> = {};
-  const options = dedupePollOptions(
-    roundTunes.map((t, i) => {
-      optionMap[String(i)] = t.accountId;
-      return abbreviatePollOption(acctOf(players, t.accountId), t.title);
-    }),
-  );
+  const options = roundTunes.map((t, i) => {
+    optionMap[String(i)] = t.accountId;
+    return abbreviatePollOption(tuneLabel(i), t.title);
+  });
 
   const pollBody = await postStatus(client, {
     status: m().pollPrompt(round),
