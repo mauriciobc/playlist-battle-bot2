@@ -96,6 +96,17 @@ function splitTheme(rest: string): { theme: string; remainder: string } | null {
 }
 
 /**
+ * Command words, English first with their pt-br equivalents. Each must end the
+ * word ("cancelar" is a command, "cancelamento" is prose), and the end test is
+ * Unicode-aware because `\b` treats accented letters as non-word characters.
+ */
+const NEWGAME_WORD = /^(?:newgame|novojogo|novo\s+jogo)(?![\p{L}\p{N}])/iu;
+const STATUS_WORD = /^(?:status|help|ajuda)(?![\p{L}\p{N}])/iu;
+const ACCEPT_WORD = /^(?:accept|aceitar|aceito)(?![\p{L}\p{N}])/iu;
+const DECLINE_WORD = /^(?:decline|recusar|recuso)(?![\p{L}\p{N}])/iu;
+const CANCEL_WORD = /^(?:cancel|cancelar)(?![\p{L}\p{N}])/iu;
+
+/**
  * Parse: `@bot newgame "<theme>" <8-12> @ch1 [@ch2] [@ch3]`
  * Returns CreateCommand (ok or {error}) when the bot is mentioned with newgame,
  * or null when this text is not a create command for this bot.
@@ -108,9 +119,9 @@ export function parseCreateCommand(
 ): CreateCommand | null {
   if (!mentionsBot(text, botAcct, instanceDomain)) return null;
   const command = stripLeadingMentions(text).trim();
-  if (!/^newgame\b/i.test(command)) return null;
+  if (!NEWGAME_WORD.test(command)) return null;
 
-  const split = splitTheme(command.replace(/^newgame\b/i, "").trim());
+  const split = splitTheme(command.replace(NEWGAME_WORD, "").trim());
   if (!split) return { error: m().cmdUsage() };
   if (!split.theme) return { error: m().cmdThemeRequired() };
 
@@ -132,7 +143,7 @@ export function parseCreateCommand(
 
 export function parseStatusCommand(text: string, botAcct: string, instanceDomain?: string): boolean {
   if (!mentionsBot(text, botAcct, instanceDomain)) return false;
-  return /^(status|help)\b/i.test(stripLeadingMentions(text).trim());
+  return STATUS_WORD.test(stripLeadingMentions(text).trim());
 }
 
 /**
@@ -171,8 +182,8 @@ function extractUrls(text: string): string[] {
   return (text.match(URL_RE) ?? []).map((url) => url.replace(TRAILING_PUNCTUATION_RE, "")).filter((url) => /^https?:\/\/./i.test(url));
 }
 
-/** v1.1 1.6: `replace <n> <url>` — case-insensitive, position 1..99. */
-const REPLACE_RE = /^replace\s+(\d{1,2})\s+(https?:\/\/\S+)/i;
+/** v1.1 1.6: `replace <n> <url>` (pt-br: `trocar`/`substituir`) — case-insensitive, position 1..99. */
+const REPLACE_RE = /^(?:replace|trocar|substituir)\s+(\d{1,2})\s+(https?:\/\/\S+)/i;
 
 /**
  * Mastodon DMs almost always start with `@bot` (reply prefix or compose mention).
@@ -185,9 +196,9 @@ function normalizeDmText(text: string): string {
 
 export function parseDmReply(text: string): DmReply {
   const t = normalizeDmText(text);
-  if (/^accept\b/i.test(t)) return { kind: "accept" };
-  if (/^decline\b/i.test(t)) return { kind: "decline" };
-  if (/^cancel\b/i.test(t)) return { kind: "cancel" };
+  if (ACCEPT_WORD.test(t)) return { kind: "accept" };
+  if (DECLINE_WORD.test(t)) return { kind: "decline" };
+  if (CANCEL_WORD.test(t)) return { kind: "cancel" };
   // Match the stem rather than enumerating accents: "classificação",
   // "classificacao" and "classificaçao" are all the same word to a player whose
   // keyboard dropped a diacritic.
