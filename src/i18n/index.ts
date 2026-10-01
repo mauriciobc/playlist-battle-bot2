@@ -127,7 +127,7 @@ const en = {
     `Vote for the song that best fits the theme: "${theme}"\n` +
     `Standings: ${standings}\n` +
     `Pot: ${pot} · Players this round: ${playing}`,
-  tuneLine: (handle: string, title: string) => `🎵 ${handle} — ${title}`,
+  tuneLine: (label: string, title: string) => `🎵 ${label} — ${title}`,
   pollPrompt: (round: number) =>
     `🗳️ Vote for the best tune in Round ${round}! Anyone can vote.`,
   resolutionWalkover: (round: number, handle: string, pot: number) =>
@@ -223,12 +223,12 @@ export type Messages = typeof en;
 
 const ptBR: Messages = {
   cmdUsage: () =>
-    'Uso: @bot newgame "<tema>" <tamanho 8-12> @desafiante1 [@desafiante2] [@desafiante3]',
+    'Uso: @bot novojogo "<tema>" <tamanho 8-12> @desafiante1 [@desafiante2] [@desafiante3]',
   cmdThemeRequired: () =>
-    'O tema é obrigatório. Uso: @bot newgame "<tema>" <tamanho 8-12> @d1 ...',
+    'O tema é obrigatório. Uso: @bot novojogo "<tema>" <tamanho 8-12> @d1 ...',
   cmdLengthRequired: () => "O tamanho da playlist (8-12) é obrigatório após o tema.",
   cmdLengthRange: () => "O tamanho da playlist deve ser entre 8 e 12.",
-  cmdTagChallenger: () => 'Mencione pelo menos 1 desafiante: @bot newgame "tema" 8 @amigo',
+  cmdTagChallenger: () => 'Mencione pelo menos 1 desafiante: @bot novojogo "tema" 8 @amigo',
   cmdMaxChallengers: () => "Máximo de 3 desafiadores (4 jogadores no total, limite da enquete).",
   cmdDuplicateChallengers: () => "Desafiadores duplicados no comando.",
   challengerLookupFailed: (acct: string) => "Conta \"" + acct + "\" não encontrada — verifique o formato @usuario@instancia.",
@@ -268,9 +268,9 @@ const ptBR: Messages = {
     `Anfitrião: ${hostHandle}\n` +
     `Tamanho da playlist: ${length}\n` +
     `Prazo para aceitar: ${deadline}\n` +
-    `Responda "accept" ou "decline".`,
+    `Responda "aceitar" ou "recusar".`,
   unexpectedCreateError: () => "Erro inesperado ao criar o jogo.",
-  statusNone: () => 'Nenhum jogo ativo encontrado. Crie um: @bot newgame "tema" 8 @amigo',
+  statusNone: () => 'Nenhum jogo ativo encontrado. Crie um: @bot novojogo "tema" 8 @amigo',
   statusLabelStatus: () => "Status",
   statusLabelTheme: () => "Tema",
   statusLabelPot: () => "Pote",
@@ -280,12 +280,12 @@ const ptBR: Messages = {
     status === "ROUND" ? `RODADA ${round}/${total}` : (PT_BR_STATUS[status] ?? status),
   statusPoints: (points) => `${points} pts`,
   unknownDm: (botHandle) =>
-    `Não entendi. Envie "accept"/"decline"/"cancel", ou um link do YouTube com sua faixa. Para iniciar um jogo, me mencione publicamente: ${botHandle} newgame "<tema>" 8-12 @amigo`,
+    `Não entendi. Envie "aceitar"/"recusar"/"cancelar", ou um link do YouTube com sua faixa. Para iniciar um jogo, me mencione publicamente: ${botHandle} novojogo "<tema>" 8-12 @amigo`,
   noInvitation: () => "Nenhum convite pendente encontrado para você.",
   cancelDone: (theme) =>
     `🚫 Jogo "${theme}" cancelado — sem campeão, sem pote. As pontuações ficam apenas como registro histórico.`,
   cancelNothing: () =>
-    'Nenhum jogo aberto seu para cancelar. Apenas o anfitrião pode cancelar, e só enquanto o duelo está aberto (DM "cancel").',
+    'Nenhum jogo aberto seu para cancelar. Apenas o anfitrião pode cancelar, e só enquanto o duelo está aberto (DM "cancelar").',
   declined: () => "Recusado. Boa sorte por aí.",
   youAreIn: () => "Você está dentro! 🎵",
   submitFirst: (len) =>
@@ -309,7 +309,7 @@ const ptBR: Messages = {
     `🔁 Faixa ${pos}/${len} substituída: ${title}`,
   replaceTuneDm: (pos, round, title, deadline) =>
     `⚠️ A faixa ${pos} ("${title}") da Rodada ${round} não está mais disponível.\n` +
-    `Envie um link do YouTube de substituição até ${deadline}, ou responda "replace ${pos} <url>".\n` +
+    `Envie um link do YouTube de substituição até ${deadline}, ou responda "trocar ${pos} <url>".\n` +
     `Sem substituição → você perde apenas a Rodada ${round}.`,
   duelStart: (theme, rounds, players) =>
     `⚔️ DUELO INICIADO — "${theme}"\n` +
@@ -321,7 +321,7 @@ const ptBR: Messages = {
     `Vote na faixa que melhor combina com o tema: "${theme}"\n` +
     `Placar: ${standings}\n` +
     `Pote: ${pot} · Jogadores nesta rodada: ${playing}`,
-  tuneLine: (handle, title) => `🎵 ${handle} — ${title}`,
+  tuneLine: (label, title) => `🎵 ${label} — ${title}`,
   pollPrompt: (round) =>
     `🗳️ Vote na melhor faixa da Rodada ${round}! Qualquer pessoa pode votar.`,
   resolutionWalkover: (round, handle, pot) =>

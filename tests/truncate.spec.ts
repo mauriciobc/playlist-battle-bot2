@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { abbreviatePollOption, assertPostLength, dedupePollOptions, POST_LIMIT, sanitizeTitleForPost, truncate } from "../src/templates/truncate.js";
+import { abbreviatePollOption, assertPostLength, POST_LIMIT, sanitizeTitleForPost, truncate, tuneLabel } from "../src/templates/truncate.js";
 
 describe("truncate", () => {
   it("keeps text within the limit as-is and cuts longer text to the limit with an ellipsis", () => {
@@ -12,17 +12,13 @@ describe("truncate", () => {
 
 describe("abbreviatePollOption", () => {
   it.each([
-    ["long title", "Alice", "An Extremely Long Tune Name From The Radio Edit"],
-    ["long player name", "VeryLongPlayerNameHere", "Song"],
-    ["emoji in title", "Zoë", "🔥 Firework Extravaganza Bonanza Party Mix"],
-  ])("fits within 25 chars including player prefix (PRD §2.3): %s", (_case, name, title) => {
-    expect(abbreviatePollOption(name, title).length).toBeLessThanOrEqual(25);
-  });
-
-  it("includes player name prefix", () => {
-    const out = abbreviatePollOption("Bob", "Short");
-    expect(out.startsWith("Bob")).toBe(true);
-    expect(out).toContain("Short");
+    ["long title", "A", "An Extremely Long Tune Name From The Radio Edit"],
+    ["emoji in title", "B", "🔥 Firework Extravaganza Bonanza Party Mix"],
+    ["empty title", "C", "  "],
+  ])("fits within 25 chars including the label prefix (PRD §2.3): %s", (_case, label, title) => {
+    const out = abbreviatePollOption(label, title);
+    expect(out.length).toBeLessThanOrEqual(25);
+    expect(out.startsWith(`${label}: `)).toBe(true);
   });
 });
 
@@ -33,35 +29,9 @@ describe("assertPostLength (PRD §8)", () => {
   });
 });
 
-describe("dedupePollOptions", () => {
-  it("leaves unique options untouched", () => {
-    expect(dedupePollOptions(["alice: Take On Me", "bob: Blue Monday"])).toEqual([
-      "alice: Take On Me",
-      "bob: Blue Monday",
-    ]);
-  });
-
-  it.each([
-    [["sam: Official Video", "sam: Official Video"]],
-    [["x: y", "x: y", "x: y"]],
-  ])("disambiguates duplicates within 25 chars (Mastodon 422 otherwise): %j", (input) => {
-    const out = dedupePollOptions(input);
-    expect(new Set(out).size).toBe(input.length);
-    for (const opt of out) expect(opt.length).toBeLessThanOrEqual(25);
-    expect(out[1]).toMatch(/#2$/);
-  });
-
-  it("regression: never drops or rearranges options — length must be preserved so optionMap indices stay aligned with vote tallies", () => {
-    const inputs = [
-      ["a: Same Song", "b: Same Song", "c: Africa"],
-      ["x: y", "x: y", "x: y"],
-      ["player has a very long display name shown here", "another extremely long display name for testing"],
-    ];
-    for (const input of inputs) {
-      const out = dedupePollOptions(input);
-      expect(out).toHaveLength(input.length);
-      input.forEach((_, i) => expect(out[i]).toContain(input[i]!.slice(0, 20)));
-    }
+describe("tuneLabel", () => {
+  it("counts A…Z then AA, AB… with no repeats", () => {
+    expect([0, 1, 25, 26, 27, 51, 52, 701, 702].map(tuneLabel)).toEqual(["A", "B", "Z", "AA", "AB", "AZ", "BA", "ZZ", "AAA"]);
   });
 });
 

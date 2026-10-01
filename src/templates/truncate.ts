@@ -10,48 +10,23 @@ export function truncate(text: string, max: number = POST_LIMIT): string {
   return `${text.slice(0, max - 1)}…`;
 }
 
-/**
- * Build a ≤25-char poll option: "<player>: <abbrev tune>".
- * Player name gets priority; remaining budget goes to the title.
- */
-export function abbreviatePollOption(playerName: string, title: string): string {
-  const name = playerName.trim() || "?";
-  if (name.length >= POLL_OPTION_LIMIT) return truncate(name, POLL_OPTION_LIMIT);
-  const sep = ": ";
-  const budget = POLL_OPTION_LIMIT - name.length - sep.length;
-  if (budget <= 1) return truncate(name, POLL_OPTION_LIMIT);
-  const tune = truncate(title.trim() || "—", budget);
-  return `${name}${sep}${tune}`;
+/** `A`, `B`, … `Z`, then `AA`, `AB`… — blind label for the n-th tune of a round. */
+export function tuneLabel(index: number): string {
+  let n = index;
+  let out = "";
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
 }
 
-/**
- * Mastodon rejects polls whose options are not unique
- * (PollOptionsValidator: `duplicate_options` → HTTP 422).
- * Truncation to 25 chars can collide (same display name, same video title),
- * so disambiguate repeats with a ` #n` suffix while staying ≤25 chars.
- */
-export function dedupePollOptions(options: string[]): string[] {
-  const seen = new Set<string>();
-  return options.map((raw) => {
-    const base = raw.trim();
-    if (!seen.has(base)) {
-      seen.add(base);
-      return base;
-    }
-    let n = 2;
-    for (;;) {
-      const suffix = ` #${n}`;
-      const candidate =
-        base.length + suffix.length <= POLL_OPTION_LIMIT
-          ? `${base}${suffix}`
-          : `${truncate(base, POLL_OPTION_LIMIT - suffix.length)}${suffix}`;
-      if (!seen.has(candidate)) {
-        seen.add(candidate);
-        return candidate;
-      }
-      n += 1;
-    }
-  });
+/** Build a ≤25-char poll option: "<label>: <abbrev tune>". */
+export function abbreviatePollOption(label: string, title: string): string {
+  const sep = ": ";
+  const budget = POLL_OPTION_LIMIT - label.length - sep.length;
+  if (budget <= 1) return truncate(label, POLL_OPTION_LIMIT);
+  return `${label}${sep}${truncate(title.trim() || "—", budget)}`;
 }
 
 /**

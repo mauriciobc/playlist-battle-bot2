@@ -194,7 +194,7 @@ for (const locale of ["en", "pt-BR"] as const) {
         m().replaceTuneDm(2, 1, "A Song", "2026-09-22T12:00:00.000Z"),
         m().duelStart("Theme", 8, 2),
         m().roundAnnounce(1, 8, "Theme", "@a 0 · @b 0", 0, "@a, @b"),
-        m().tuneLine("@a", "A Song"),
+        m().tuneLine("A", "A Song"),
         m().pollPrompt(1),
         m().resolutionWin(1, "@a", 2),
         m().resolutionTie(1, 1),

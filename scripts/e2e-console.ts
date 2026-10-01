@@ -394,7 +394,8 @@ export class Harness {
       throw new Error(`${poll} has ${options.length} options but its vector names ${handles.length} players`);
     }
     return options.map((option, index) => {
-      const handle = handles.find((h) => option.startsWith(`${h}: `));
+      // Options are blind ("A: <title>"); the harness's fake titles embed the submitter's handle.
+      const handle = handles.find((h) => option.includes(`Track ${h}`));
       if (!handle) throw new Error(`${poll} option ${index} ("${option}") matches none of ${handles.join(", ")}`);
       return spec[handle]!;
     });

@@ -116,9 +116,8 @@ describe("postRound (PRD §5.5)", () => {
     expect(Object.values(result.optionMap).sort()).toEqual(["a", "c"]);
   });
 
-  it("keeps poll options unique, ≤25 chars (PRD §2.3), and aligned with optionMap when they collide", async () => {
-    // same handle + same title → identical truncated options; Mastodon rejects duplicates with 422
-    const players = [player("a", "averyveryverylongplayername"), player("b", "averyveryverylongplayername"), player("c", "carol")];
+  it("never reveals who submitted a tune: posts and poll options carry labels, not names (blind vote)", async () => {
+    const players = [player("a", "alice"), player("b", "bob"), player("c", "carol")];
     const tunes = [
       tune("a", "aaaaaaaaaaa", "An Extremely Long Song Title That Goes On And On Forever"),
       tune("b", "bbbbbbbbbbb", "An Extremely Long Song Title That Goes On And On Forever"),
@@ -126,11 +125,13 @@ describe("postRound (PRD §5.5)", () => {
     ];
     const result = await postRound(client, game(), players, tunes, 1);
 
-    // dedupePollOptions suffixes rather than drops — indices must stay aligned
+    const tunePosts = posts.slice(1, 4).map((p) => p.body.status);
     const options = posts.at(-1)!.body.poll!.options;
-    expect(options).toHaveLength(3);
+    for (const text of [...tunePosts, ...options]) expect(text).not.toMatch(/alice|bob|carol|@/i);
+    expect(tunePosts.map((t) => t.split(" ")[1])).toEqual(["A", "B", "C"]);
     expect(new Set(options).size).toBe(3);
     for (const opt of options) expect(opt.length).toBeLessThanOrEqual(25);
+    // the label→account mapping stays server-side
     expect(result.optionMap).toEqual({ "0": "a", "1": "b", "2": "c" });
   });
 

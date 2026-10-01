@@ -155,6 +155,38 @@ describe("parseStatusCommand", () => {
   });
 });
 
+describe("pt-br command words", () => {
+  it.each([
+    [`@${BOT} novojogo "Anos 80" 8 @alice`, { theme: "Anos 80", playlistLength: 8, challengers: ["alice"] }],
+    [`@${BOT} Novo Jogo "Anos 80" 10 @alice @bob`, { theme: "Anos 80", playlistLength: 10, challengers: ["alice", "bob"] }],
+  ])("creates a game from %j", (text, expected) => {
+    expect(parseCreateCommand(text, BOT)).toEqual(expected);
+  });
+
+  it("treats ajuda like status, and only as a whole word", () => {
+    expect(parseStatusCommand(`@${BOT} ajuda`, BOT)).toBe(true);
+    expect(parseStatusCommand(`@${BOT} ajudante`, BOT)).toBe(false);
+  });
+
+  it.each([
+    ["aceitar", { kind: "accept" }],
+    ["@playlistbattle Aceito", { kind: "accept" }],
+    ["recusar", { kind: "decline" }],
+    ["RECUSO!", { kind: "decline" }],
+    ["cancelar", { kind: "cancel" }],
+    ["trocar 3 https://youtu.be/aaaaaaaaaaa", { kind: "replace", position: 3, url: "https://youtu.be/aaaaaaaaaaa" }],
+    ["substituir 12 https://youtu.be/aaaaaaaaaaa", { kind: "replace", position: 12, url: "https://youtu.be/aaaaaaaaaaa" }],
+    ["conquistas", { kind: "badges" }],
+    ["classificação", { kind: "ranking" }],
+  ])("DM %j", (text, expected) => {
+    expect(parseDmReply(text)).toEqual(expected);
+  });
+
+  it.each(["aceitarei", "cancelamento", "recusado"])("does not read %j as a command", (text) => {
+    expect(parseDmReply(text)).toEqual({ kind: "unknown" });
+  });
+});
+
 describe("parseDmReply (accept/decline/cancel/links/replace)", () => {
   it.each([
     ["accept", { kind: "accept" }],
