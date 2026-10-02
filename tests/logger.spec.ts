@@ -33,7 +33,9 @@ describe("createLogger", () => {
         token: "super-secret",
         mastodonToken: "also-secret",
         ytCookie: "__Secure-3PAPISID=cookie",
-        headers: { authorization: "Bearer leak" },
+        cookie: "SID=raw-cookie",
+        headers: { authorization: "Bearer leak", cookie: "SID=header-cookie" },
+        request: { headers: { cookie: "SID=nested-cookie" } },
       },
       "auth context",
     );
@@ -41,7 +43,10 @@ describe("createLogger", () => {
     expect(text).not.toContain("super-secret");
     expect(text).not.toContain("also-secret");
     expect(text).not.toContain("__Secure-3PAPISID=cookie");
+    expect(text).not.toContain("raw-cookie");
     expect(text).not.toContain("Bearer leak");
+    expect(text).not.toContain("header-cookie");
+    expect(text).not.toContain("nested-cookie");
     expect(text).toContain("[REDACTED]");
   });
 });

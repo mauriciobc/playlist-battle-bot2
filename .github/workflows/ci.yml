@@ -24,5 +24,7 @@ jobs:
       - run: npm test
       - run: npm run e2e:console
       - run: npm run e2e:console -- --random --seed=42
+      # Pins the delivered volume, so losing a status or DM fails the build.
+      - run: npm run bench:sim
       - run: npm run build
       - run: npm audit --audit-level=moderate

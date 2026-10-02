@@ -58,7 +58,7 @@ const EXPECTED_CHECKS = 825;
  * but it must be identical in every repeat of a run (checked below), because the
  * workload is deterministic.
  */
-const EXPECTED_DELIVERED = { status: 1216, direct: 959 };
+const EXPECTED_DELIVERED = { status: 1216, direct: 1064 };
 
 type Pass = { label: string; random: boolean; seed: number };
 

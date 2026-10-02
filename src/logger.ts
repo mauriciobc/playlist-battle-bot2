@@ -16,12 +16,17 @@ const REDACT_PATHS = [
   "MASTODON_TOKEN",
   "mastodonToken",
   "ytCookie",
+  "cookie",
   "authorization",
   "headers.authorization",
+  "headers.cookie",
   "req.headers.authorization",
+  "req.headers.cookie",
   "*.token",
   "*.mastodonToken",
   "*.ytCookie",
+  "*.cookie",
+  "*.headers.cookie",
 ];
 
 const require = createRequire(import.meta.url);
