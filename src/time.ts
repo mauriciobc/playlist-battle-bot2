@@ -46,3 +46,12 @@ export function isoWeekStart(date: Date): Date {
 export function toUnixSeconds(ms: number): number {
   return Math.floor(ms / MS_PER_SECOND);
 }
+
+/**
+ * True while `now` sits before an ISO deadline. A null deadline is never within
+ * — and the predicate narrows it, so a caller that keeps the value has a
+ * deadline it can store.
+ */
+export function isWithinDeadline(deadline: string | null, now: Date): deadline is string {
+  return deadline !== null && now.getTime() < new Date(deadline).getTime();
+}

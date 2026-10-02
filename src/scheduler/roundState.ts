@@ -38,7 +38,7 @@ import {
   type RoundMeta,
 } from "../db/rounds.js";
 import type { HandlerDeps } from "../handlers/deps.js";
-import { handlePlayerDeleted } from "../handlers/closure.js";
+import { handlePlayerDeleted, tryDeleteStatus } from "../handlers/closure.js";
 import { MastodonApiError } from "../mastodon/client.js";
 import { dm } from "../mastodon/dm.js";
 import {
@@ -59,7 +59,7 @@ import {
 import { champions, potShares } from "../game/scoring.js";
 import { mulberry32, roundSeed, seededShuffle } from "../game/shuffle.js";
 import { errorMessage } from "../errors.js";
-import { addSeconds, SECONDS_PER_MINUTE } from "../time.js";
+import { addSeconds, isWithinDeadline, SECONDS_PER_MINUTE } from "../time.js";
 import { m } from "../i18n/index.js";
 import { claimKey, exclusively } from "./claims.js";
 
@@ -292,11 +292,8 @@ function savePostedPoll(db: Db, gameId: string, round: number, poll: PostRoundRe
  * sweep retries it, so removeStatus's "will retry" warning would mislead.
  */
 async function deleteOrphanedPoll(handler: HandlerDeps, pollStatusId: string): Promise<void> {
-  try {
-    await handler.client.delete(`/api/v1/statuses/${pollStatusId}`);
-  } catch {
-    // Best effort only.
-  }
+  const result = await tryDeleteStatus(handler.client, pollStatusId);
+  if (!result.ok) handler.logger?.debug({ pollStatusId, err: result.err }, "orphaned poll cleanup failed");
 }
 
 /** Post a decided round's result and stamp it posted. False when the game went terminal first. */
@@ -437,8 +434,8 @@ function replacementWindow(handler: HandlerDeps, announced: Round | undefined): 
     return { deadline, notified: new Set(), prompts: {} };
   }
   const saved = roundMeta(announced).replacement ?? {};
-  const deadline = saved.deadline;
-  if (!deadline || now.getTime() >= new Date(deadline).getTime()) return null;
+  const deadline = saved.deadline ?? null;
+  if (!isWithinDeadline(deadline, now)) return null;
   return { deadline, notified: new Set(saved.notified ?? []), prompts: { ...(saved.prompts ?? {}) } };
 }
 

@@ -265,6 +265,7 @@ export function seedPollRound(
     statusId?: string;
     players?: string[];
     watchedVotes?: number;
+    watchedTallyJson?: string;
     votesChangedAt?: string;
   } = {},
 ): void {
@@ -272,8 +273,8 @@ export function seedPollRound(
   const optionMap = Object.fromEntries((o.players ?? ["host1", "alice"]).map((p, i) => [String(i), p]));
   db.prepare(
     `INSERT INTO rounds (game_id, number, status, poll_status_id, poll_id, poll_expires_at,
-      option_map_json, watched_votes, votes_changed_at)
-     VALUES (?, ?, 'poll_open', ?, ?, ?, ?, ?, ?)`,
+      option_map_json, watched_votes, watched_tally_json, votes_changed_at)
+     VALUES (?, ?, 'poll_open', ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     gameId,
     round,
@@ -282,6 +283,7 @@ export function seedPollRound(
     o.expiresAt ?? PAST,
     JSON.stringify(optionMap),
     o.watchedVotes ?? null,
+    o.watchedTallyJson ?? null,
     o.votesChangedAt ?? null,
   );
 }

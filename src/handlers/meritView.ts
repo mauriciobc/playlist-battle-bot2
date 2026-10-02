@@ -25,10 +25,14 @@ export const BOARD_MIN_DUELS = 3;
 /** Rows rendered on a board. */
 const BOARD_ROWS = 5;
 
+/** Start of the rolling window: one computation, reused everywhere. */
+function boardSince(now: Date): string {
+  return new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
 /** Days since the window start, rendered for the header. */
 function windowLabel(now: Date): string {
-  const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  return since.toISOString().slice(0, 10);
+  return boardSince(now).slice(0, 10);
 }
 
 /**
@@ -39,7 +43,7 @@ function windowLabel(now: Date): string {
  * "play more", which is honest, where a 1-1 record at the top would not be.
  */
 export function boardText(db: Db, now: Date, metric: BoardMetric = "wins", instanceDomain?: string): string {
-  const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const since = boardSince(now);
   const board = loadBoard(db, metric, { since, minDuels: BOARD_MIN_DUELS });
 
   if (board.length === 0) {
@@ -56,9 +60,14 @@ export function boardText(db: Db, now: Date, metric: BoardMetric = "wins", insta
   return truncate([m().boardHeader(windowLabel(now)), ...rows, body].filter(Boolean).join("\n"), POST_LIMIT);
 }
 
+/** One merit view by name — the same text for a DM or a public reply. */
+export function meritText(kind: "ranking" | "badges", db: Db, accountId: string, acct: string, now: Date, instanceDomain?: string): string {
+  return kind === "ranking" ? rankingTextFor(db, accountId, acct, now, instanceDomain) : playerText(db, accountId, acct, instanceDomain);
+}
+
 /** Whether the board has anyone to show; false means "play more", not news. */
 export function boardHasRows(db: Db, now: Date, metric: BoardMetric = "wins"): boolean {
-  const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const since = boardSince(now);
   return loadBoard(db, metric, { since, minDuels: BOARD_MIN_DUELS }).length > 0;
 }
 
@@ -88,7 +97,7 @@ export function playerText(db: Db, accountId: string, acct: string, instanceDoma
 /** The board, plus where the asker stands on it. */
 export function rankingTextFor(db: Db, accountId: string, acct: string, now: Date, instanceDomain?: string): string {
   const board = boardText(db, now, "wins", instanceDomain);
-  const since = new Date(now.getTime() - BOARD_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const since = boardSince(now);
   const placing = loadBoard(db, "wins", { since, minDuels: BOARD_MIN_DUELS });
   const index = placing.findIndex((e: BoardEntry) => e.accountId === accountId);
   const standing = index === -1 ? m().boardUnranked() : m().boardYourRank(index + 1, placing.length);

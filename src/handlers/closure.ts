@@ -69,6 +69,24 @@ export async function voidOpenGame(
 }
 
 /**
+ * Delete a status, reporting `ok` for both "deleted now" and 404/410 (already
+ * gone) — either satisfies a cleanup. A failure carries the error so the caller
+ * decides whether to log it, retry it, or shrug.
+ */
+export async function tryDeleteStatus(
+  client: HandlerDeps["client"],
+  statusId: string,
+): Promise<{ ok: boolean; err?: unknown }> {
+  try {
+    await client.delete(`/api/v1/statuses/${statusId}`);
+    return { ok: true };
+  } catch (err) {
+    const alreadyGone = err instanceof MastodonApiError && (err.status === HTTP_NOT_FOUND || err.status === HTTP_GONE);
+    return alreadyGone ? { ok: true } : { ok: false, err };
+  }
+}
+
+/**
  * Delete a status, treating 404/410 as already gone. Any other failure is
  * logged and reported as false so the caller keeps its retry state.
  */
@@ -77,15 +95,12 @@ export async function removeStatus(
   statusId: string,
   context: Record<string, unknown>,
 ): Promise<boolean> {
-  try {
-    await deps.client.delete(`/api/v1/statuses/${statusId}`);
-    return true;
-  } catch (err) {
-    const alreadyGone = err instanceof MastodonApiError && (err.status === HTTP_NOT_FOUND || err.status === HTTP_GONE);
-    if (alreadyGone) return true;
-    deps.logger?.warn({ ...context, statusId, err }, "status cleanup failed; will retry");
+  const result = await tryDeleteStatus(deps.client, statusId);
+  if (!result.ok) {
+    deps.logger?.warn({ ...context, statusId, err: result.err }, "status cleanup failed; will retry");
     return false;
   }
+  return true;
 }
 
 /**

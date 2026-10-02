@@ -398,7 +398,13 @@ describe("checkPolls — stagnation early close", () => {
   const LONG_POLL = { durationSec: 14400, expiresAt: "2026-09-21T15:30:00.000Z" };
 
   function seedStagnant(
-    o: { expiresAt: string; durationSec?: number; watchedVotes?: number; votesChangedAt?: string },
+    o: {
+      expiresAt: string;
+      durationSec?: number;
+      watchedVotes?: number;
+      watchedTallyJson?: string;
+      votesChangedAt?: string;
+    },
   ): string {
     const { durationSec = 900, ...round } = o;
     const id = seedDuel(h.db, { currentRound: 1, pollDurationSec: durationSec });
@@ -496,6 +502,39 @@ describe("checkPolls — stagnation early close", () => {
     expect(playerRow(h.db, id, "host1").points).toBe(3);
     expect(h.deleted).toContain("/api/v1/statuses/poll-status-1");
     expect(gameRow(h.db, id).current_round).toBe(2);
+  });
+
+  // The tally fingerprint is what decides "changed" for rows the bot itself
+  // wrote; watched_votes alone would miss a reshuffle of the same votes.
+  const FINGERPRINT = '[{"accountId":"alice","votes":2},{"accountId":"host1","votes":3}]';
+
+  it("stale vote total with an unchanged tally → still stagnant, resolves", async () => {
+    const id = seedStagnant({
+      expiresAt: "2026-09-21T12:10:00.000Z", // age 300s
+      watchedVotes: 999, // would read as "changed" if the total were the fingerprint
+      watchedTallyJson: FINGERPRINT,
+      votesChangedAt: "2026-09-21T11:00:00.000Z", // still 3600s
+    });
+    h.poll.votes = [3, 2];
+
+    await checkPolls(h.sched);
+
+    expect(roundRow(h.db, id, 1)).toMatchObject({ status: "resolved", winner_account_id: "host1" });
+  });
+
+  it("same vote total but a reshuffled tally → counts as a change, stays open", async () => {
+    const id = seedStagnant({
+      expiresAt: "2026-09-21T12:10:00.000Z", // age 300s
+      watchedVotes: 5, // same total as the live poll
+      watchedTallyJson: '[{"accountId":"alice","votes":0},{"accountId":"host1","votes":5}]',
+      votesChangedAt: "2026-09-21T11:00:00.000Z",
+    });
+    h.poll.votes = [3, 2];
+
+    await checkPolls(h.sched);
+
+    expect(roundRow(h.db, id, 1)).toMatchObject({ status: "poll_open", watched_votes: 5, votes_changed_at: NOW });
+    expect(h.deleted).toHaveLength(0);
   });
 
   it("disabled early close → no live poll fetches", async () => {

@@ -6,7 +6,7 @@ import { CLOSURES, voidOpenGame } from "./closure.js";
 import { htmlToText, parseDmReply } from "./commands.js";
 import type { CommandInput, HandlerDeps, HandlerResult } from "./deps.js";
 import { handleAccept, handleDecline } from "./invite.js";
-import { playerText, rankingTextFor } from "./meritView.js";
+import { meritText } from "./meritView.js";
 import { handleLinkSubmission, handleReplace } from "./submission.js";
 
 /** How much of an unrecognized DM the debug log keeps. */
@@ -28,11 +28,9 @@ export async function handleDm(input: CommandInput, deps: HandlerDeps): Promise<
     case "replace":
       return handleReplace(input, deps, parsed);
     case "ranking":
-      await dmAuthor(deps, input, rankingTextFor(deps.db, input.accountId, input.accountAcct, deps.now(), deps.instanceDomain));
-      return { handled: true, kind: "ranking" };
     case "badges":
-      await dmAuthor(deps, input, playerText(deps.db, input.accountId, input.accountAcct, deps.instanceDomain));
-      return { handled: true, kind: "badges" };
+      await dmAuthor(deps, input, meritText(parsed.kind, deps.db, input.accountId, input.accountAcct, deps.now(), deps.instanceDomain));
+      return { handled: true, kind: parsed.kind };
   }
 
   deps.logger?.debug(

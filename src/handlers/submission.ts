@@ -6,6 +6,7 @@ import { errorMessage } from "../errors.js";
 import { finalizeCollection, startRound, submitTune, ValidationError } from "../game/engine.js";
 import { FIRST_ROUND, MIN_PLAYERS, type Game, type Player, type Tune } from "../game/types.js";
 import { m } from "../i18n/index.js";
+import { isWithinDeadline } from "../time.js";
 import { dm, dmAuthor } from "../mastodon/dm.js";
 import { mention } from "../mastodon/handle.js";
 import { reply } from "../mastodon/reply.js";
@@ -193,7 +194,7 @@ function isReplacementWindowOpen(deps: HandlerDeps, game: Game): boolean {
   const meta = roundMeta(round);
   const deadline = meta.replacement?.deadline;
   if (round?.status !== "announced" || meta.publishing || !deadline) return false;
-  return deps.now().getTime() < new Date(deadline).getTime();
+  return isWithinDeadline(deadline, deps.now());
 }
 
 /** Swap the tune at `position` for the video in `url` (shared by both replace paths). */
@@ -237,8 +238,7 @@ function isSwapStillOpen(deps: HandlerDeps, gameId: string, position: number): b
     current.currentRound === position &&
     isReplacementWindowOpen(deps, current);
   const collectingStillOpen = current?.status === "COLLECTING" &&
-    !!current.submissionDeadline &&
-    deps.now().getTime() < new Date(current.submissionDeadline).getTime();
+    isWithinDeadline(current.submissionDeadline, deps.now());
   return replacementStillOpen || collectingStillOpen;
 }
 

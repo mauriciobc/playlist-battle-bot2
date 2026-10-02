@@ -98,6 +98,7 @@ export function byStanding(a: Player, b: Player): number {
  * Pot bonus is already included in points when awarded.
  */
 export function champions(players: Player[]): string[] {
+  if (players.length === 0) return [];
   const top = Math.max(...players.map((p) => p.points));
   return players.filter((p) => p.points === top).sort(byStanding).map((p) => p.accountId);
 }

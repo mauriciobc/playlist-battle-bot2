@@ -366,31 +366,40 @@ export async function postSideEffect(
   return posted.id;
 }
 
+type PollOption = { title: string; votes_count: number | null };
+
+/**
+ * Validate a poll response against the stored option map and map indices →
+ * accountIds. null for any mismatch or hidden tally; the caller decides
+ * whether that is a throw (expired poll) or a silent skip (live snapshot).
+ */
+function parsePollOptions(options: PollOption[] | undefined, optionMap: Record<string, string>): Tally[] | null {
+  if (!Array.isArray(options) || options.length !== Object.keys(optionMap).length) return null;
+  const tallies: Tally[] = [];
+  for (const [idx, opt] of options.entries()) {
+    const accountId = optionMap[String(idx)];
+    const votes = opt.votes_count;
+    if (!accountId || typeof votes !== "number" || !Number.isInteger(votes) || votes < 0) return null;
+    tallies.push({ accountId, votes });
+  }
+  return tallies;
+}
+
 /** Fetch expired poll tallies and map option indices → accountId votes. */
 export async function tallyPoll(
   client: MastodonClient,
   pollId: string,
   optionMap: Record<string, string>,
 ): Promise<Tally[]> {
-  const poll = await client.get<{
-    expired: boolean;
-    options: { title: string; votes_count: number }[];
-  }>(`/api/v1/polls/${pollId}`);
+  const poll = await client.get<{ expired: boolean; options: PollOption[] }>(`/api/v1/polls/${pollId}`);
 
   if (poll.expired !== true) {
     throw new Error("Mastodon poll is not expired");
   }
-  if (!Array.isArray(poll.options) || poll.options.length !== Object.keys(optionMap).length) {
+  const tallies = parsePollOptions(poll.options, optionMap);
+  if (!tallies) {
     throw new Error("Mastodon poll options do not match the stored round map");
   }
-  const tallies: Tally[] = [];
-  poll.options.forEach((opt, idx) => {
-    const accountId = optionMap[String(idx)];
-    if (!accountId || !Number.isInteger(opt.votes_count) || opt.votes_count < 0) {
-      throw new Error("Mastodon poll response contains an invalid option tally");
-    }
-    tallies.push({ accountId, votes: opt.votes_count });
-  });
   return tallies;
 }
 
@@ -409,21 +418,8 @@ export async function pollSnapshot(
   pollId: string,
   optionMap: Record<string, string>,
 ): Promise<PollSnapshot | null> {
-  const poll = await client.get<{
-    options: { title: string; votes_count: number | null }[];
-  }>(`/api/v1/polls/${pollId}`);
-
-  if (!Array.isArray(poll.options) || poll.options.length !== Object.keys(optionMap).length) {
-    return null;
-  }
-
-  const tallies: Tally[] = [];
-  for (const [idx, opt] of poll.options.entries()) {
-    const votes = opt.votes_count;
-    if (votes === null || votes === undefined) return null;
-    const accountId = optionMap[String(idx)];
-    if (!accountId) return null;
-    tallies.push({ accountId, votes });
-  }
+  const poll = await client.get<{ options: PollOption[] }>(`/api/v1/polls/${pollId}`);
+  const tallies = parsePollOptions(poll.options, optionMap);
+  if (!tallies) return null;
   return { tallies, totalVotes: totalVotes(tallies) };
 }

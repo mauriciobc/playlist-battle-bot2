@@ -25,7 +25,7 @@ import {
   parseStatusCommand,
   type CreateCommand,
 } from "./commands.js";
-import { playerText, rankingTextFor } from "./meritView.js";
+import { meritText } from "./meritView.js";
 import type { CommandInput, Handled, HandlerDeps, HandlerResult } from "./deps.js";
 
 type NewGameCommand = Exclude<CreateCommand, { error: string }>;
@@ -53,13 +53,9 @@ export async function handlePublicCommand(input: CommandInput, deps: HandlerDeps
   if (parseStatusCommand(text, deps.botAcct, deps.instanceDomain)) return handleStatus(input, deps);
 
   const merit = parseMeritCommand(text, deps.botAcct, deps.instanceDomain);
-  if (merit === "ranking") {
-    await reply(deps, input.statusId, rankingTextFor(deps.db, input.accountId, input.accountAcct, deps.now(), deps.instanceDomain), replyVisibility(input));
-    return { handled: true, kind: "ranking" };
-  }
-  if (merit === "badges") {
-    await reply(deps, input.statusId, playerText(deps.db, input.accountId, input.accountAcct, deps.instanceDomain), replyVisibility(input));
-    return { handled: true, kind: "badges" };
+  if (merit === "ranking" || merit === "badges") {
+    await reply(deps, input.statusId, meritText(merit, deps.db, input.accountId, input.accountAcct, deps.now(), deps.instanceDomain), replyVisibility(input));
+    return { handled: true, kind: merit };
   }
 
   const command = parseCreateCommand(text, deps.botAcct, deps.instanceDomain, input.mentions);

@@ -269,19 +269,19 @@ function votesLastChangedAt(db: Db, poll: WatchedPoll, snapshot: PollSnapshot, n
   const recordSeen = (changedAt: Date): void =>
     watchPollVotes(db, poll, { totalVotes: snapshot.totalVotes, tallyJson, changedAt });
 
-  const firstSight = poll.watchedTallyJson === null && poll.watchedVotes === null;
-  if (firstSight) {
+  // A legacy row (pre-fingerprint) tracked only the vote total; compare what it
+  // stored in that format, then let recordSeen adopt the tally for next time.
+  const isLegacyRow = poll.watchedTallyJson === null;
+
+  if (isLegacyRow && poll.watchedVotes === null) {
     const changedAt = snapshot.totalVotes === 0 ? openedAt : now;
     recordSeen(changedAt);
     return changedAt;
   }
 
-  // Legacy rows tracked only the vote total, not the per-option tally.
-  const isLegacyRow = poll.watchedTallyJson === null;
-  const votesChanged = isLegacyRow
-    ? poll.watchedVotes !== snapshot.totalVotes
-    : poll.watchedTallyJson !== tallyJson;
-  if (votesChanged) {
+  const stored = isLegacyRow ? String(poll.watchedVotes) : poll.watchedTallyJson;
+  const current = isLegacyRow ? String(snapshot.totalVotes) : tallyJson;
+  if (stored !== current) {
     recordSeen(now);
     return null;
   }

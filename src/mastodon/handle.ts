@@ -74,19 +74,21 @@ const TEXT_MENTION_RE = /(?<![=/\w])@([A-Za-z0-9_]+)(?:@([A-Za-z0-9.-]+))?/g;
  * is left as written.
  */
 export function qualifyMentions(text: string, mentions: readonly StatusMention[], instanceDomain?: string): string {
-  const pool = mentions.map((m) => ({
+  const pool = mentions.map((m, i) => ({
+    i,
     username: m.username.toLowerCase(),
     acct: canonicalAcct(m.acct, instanceDomain),
-    used: false,
   }));
+  const consumed = new Set<number>();
   return text.replace(TEXT_MENTION_RE, (written: string, user: string, domain: string | undefined) => {
     const typed = domain ? canonicalAcct(`${user}@${domain}`, instanceDomain).toLowerCase() : null;
     const candidates = pool.filter((p) => p.username === user.toLowerCase());
-    const unused = candidates.filter((p) => !p.used);
     const hit =
-      (typed && candidates.find((p) => p.acct.toLowerCase() === typed)) || unused[0] || candidates[0];
+      (typed && candidates.find((p) => p.acct.toLowerCase() === typed)) ||
+      candidates.find((p) => !consumed.has(p.i)) ||
+      candidates[0];
     if (!hit) return written;
-    hit.used = true;
+    consumed.add(hit.i);
     return `@${hit.acct}`;
   });
 }

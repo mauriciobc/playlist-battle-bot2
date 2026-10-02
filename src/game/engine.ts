@@ -18,7 +18,7 @@ import {
   type TuneDraft,
 } from "./types.js";
 import { m, type Messages } from "../i18n/index.js";
-import { addSeconds } from "../time.js";
+import { addSeconds, isWithinDeadline } from "../time.js";
 
 /**
  * Pure game engine — all PRD §5/§6/§7 lifecycle logic with zero I/O.
@@ -179,9 +179,7 @@ export function declineInvite(
 }
 
 function isCollectingAt(game: Game, now: Date): boolean {
-  return game.status === "COLLECTING" &&
-    game.submissionDeadline !== null &&
-    now.getTime() < new Date(game.submissionDeadline).getTime();
+  return game.status === "COLLECTING" && isWithinDeadline(game.submissionDeadline, now);
 }
 
 /** Append `draft` to the player's playlist; returns every tune of the game. */
@@ -266,7 +264,7 @@ export function finalizeCollection(
     game: finalized,
     players: updatedPlayers,
     outcome,
-    defaultWinnerId: outcome === "default_win" ? completeIds[0]! : null,
+    defaultWinnerId: completeIds.length === 1 ? (completeIds[0] ?? null) : null,
   };
 }
 
